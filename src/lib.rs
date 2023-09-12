@@ -1,6 +1,8 @@
+#![allow(dead_code, missing_docs)]
+
+mod comms;
 mod eiger_node;
 mod error;
-mod comms;
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right

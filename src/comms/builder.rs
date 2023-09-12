@@ -1,16 +1,19 @@
+use crate::comms::error::CommsError;
+use crate::comms::message::CommsMessage;
+use crate::comms::{listen_on_bi_streams, IncomingConnections, IncomingMsg, CHANNEL_SIZE};
+use quinn::{Connection, Endpoint, IdleTimeout, SendStream, TransportConfig, VarInt};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use std::time::Duration;
-use quinn::{Endpoint, IdleTimeout, TransportConfig, VarInt};
-use rustls::CertificateError;
-use crate::comms::IncomingConnections;
-use crate::error::WrapperError;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tracing::{trace, warn};
 
-/// Channel bounds
-const CHANNEL_SIZE: usize = 10_000;
+pub(crate) const DEFAULT_IDLE_TIMEOUT: u32 = 10_000; // 10s
 
-/// Build a [`crate::Endpoint`]
+/// Hard-coded server name for self-signed certificates.
+pub(crate) const SERVER_NAME: &str = "eiger.test";
+
+/// Build a [`crate::Comms`]
 #[allow(missing_debug_implementations)]
 pub struct Builder {
     addr: SocketAddr,
@@ -39,21 +42,18 @@ impl Builder {
         Self::default()
     }
 
-
-    /// Instantiate a server (peer) [`Endpoint`] using the parameters passed to this builder.
-    pub fn server(self) -> Result<(Endpoint, IncomingConnections), WrapperError> {
+    /// Instantiate a server (peer) [`quinn::Endpoint`] using the parameters passed to this builder.
+    pub fn server(self) -> Result<(Endpoint, IncomingConnections), CommsError> {
         let (cfg_srv, cfg_cli) = self.config()?;
 
-        let mut endpoint = quinn::Endpoint::server(cfg_srv, self.addr)?;
+        let mut endpoint = quinn::Endpoint::server(cfg_srv, self.addr)
+            .map_err(|e| CommsError::Generic(e.to_string()))?;
         endpoint.set_default_client_config(cfg_cli);
 
-        let (connection_tx, connection_rx) = mpsc::channel(CHANNEL_SIZE);
+        let (connection_tx, connection_rx) = channel(CHANNEL_SIZE);
         listen_for_incoming_connections(endpoint.clone(), connection_tx);
 
-        Ok((
-            endpoint,
-            IncomingConnections(connection_rx),
-        ))
+        Ok((endpoint, IncomingConnections(connection_rx)))
     }
 
     /// Helper to construct a [`TransportConfig`] from our parameters.
@@ -67,12 +67,10 @@ impl Builder {
         config
     }
 
-    pub(crate) fn config(
-        &self,
-    ) -> Result<(quinn::ServerConfig, quinn::ClientConfig), WrapperError> {
+    pub(crate) fn config(&self) -> Result<(quinn::ServerConfig, quinn::ClientConfig), CommsError> {
         let transport = Arc::new(self.transport_config());
 
-        let (mut server, mut client) = config().map_err(EndpointError::Certificate)?;
+        let (mut server, mut client) = config()?;
         let _ = server.transport_config(Arc::clone(&transport));
         let _ = client.transport_config(Arc::clone(&transport));
 
@@ -80,25 +78,26 @@ impl Builder {
     }
 }
 
-// We use a hard-coded server name for self-signed certificates.
-pub(crate) const SERVER_NAME: &str = "eiger.test";
-
-fn config() -> Result<(quinn::ServerConfig, quinn::ClientConfig), CertificateError> {
+fn config() -> Result<(quinn::ServerConfig, quinn::ClientConfig), CommsError> {
     let mut roots = rustls::RootCertStore::empty();
-    let (cert, key) = generate_cert()?;
-    roots.add(&cert)?;
+    let (cert, key) = generate_cert().map_err(|e| CommsError::BadCertificate(e.to_string()))?;
+    roots
+        .add(&cert)
+        .map_err(|e| CommsError::BadCertificate(e.to_string()))?;
 
     let mut client_crypto = rustls::ClientConfig::builder()
         .with_safe_defaults()
         .with_root_certificates(roots)
         .with_no_client_auth();
 
+    // NOTE: This is just a placeholder
     // allow client to connect to unknown certificates, eg those generated above
     client_crypto
         .dangerous()
         .set_certificate_verifier(Arc::new(SkipServerVerification));
 
-    let server = quinn::ServerConfig::with_single_cert(vec![cert], key)?;
+    let server = quinn::ServerConfig::with_single_cert(vec![cert], key)
+        .map_err(|e| CommsError::BadCertificate(e.to_string()))?;
     let client = quinn::ClientConfig::new(Arc::new(client_crypto));
 
     Ok((server, client))
@@ -130,4 +129,43 @@ impl rustls::client::ServerCertVerifier for SkipServerVerification {
     ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
         Ok(rustls::client::ServerCertVerified::assertion())
     }
+}
+
+fn listen_for_incoming_connections(
+    quinn_endpoint: quinn::Endpoint,
+    connection_tx: Sender<(Connection, Receiver<IncomingMsg>)>,
+) {
+    let _handle = tokio::spawn(async move {
+        while let Some(quinn_conn) = quinn_endpoint.accept().await {
+            let conn_sender = connection_tx.clone();
+            // move incoming conn waiting off thread so as not to block us
+            let _handle = tokio::spawn(async move {
+                match quinn_conn.await {
+                    Ok(connection) => {
+                        let conn_id = connection.stable_id();
+                        let (peer_connection_tx, peer_connection_rx) =
+                            channel::<Result<(CommsMessage, Option<SendStream>), CommsError>>(
+                                CHANNEL_SIZE,
+                            );
+                        listen_on_bi_streams(connection.clone(), peer_connection_tx);
+                        trace!("Incoming new connection conn_id={conn_id}");
+                        if conn_sender
+                            .send((connection, peer_connection_rx))
+                            .await
+                            .is_err()
+                        {
+                            warn!("Dropping incoming connection conn_id={conn_id}, because receiver was dropped");
+                        }
+                    }
+                    Err(err) => {
+                        warn!("An incoming connection failed because of: {:?}", err);
+                    }
+                }
+            });
+        }
+
+        trace!(
+            "quinn::Endpoint::accept() returned None. There will be no more incoming connections"
+        );
+    });
 }
