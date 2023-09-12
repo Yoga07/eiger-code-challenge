@@ -2,22 +2,31 @@ mod builder;
 mod error;
 mod message;
 
+pub use error::CommsError;
+
 use crate::comms::builder::{Builder, SERVER_NAME};
-use crate::comms::error::CommsError;
 use crate::comms::message::CommsMessage;
+use bytes::Bytes;
 use quinn::{Connection, RecvStream, SendStream};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{RwLock, RwLockWriteGuard};
+use tokio::task::JoinHandle;
 use tracing::{error, trace};
+use crate::message::NodeMessage;
 
 /// Channel bounds
 pub(crate) const CHANNEL_SIZE: usize = 10_000;
 
+pub(crate) const IDLE_TIMEOUT: usize = 60 * 60 * 1_000; // 3600s
+
 pub struct Comms {
     quinn_endpoint: quinn::Endpoint,
-    incoming_conns: IncomingConnections,
-    connection_pool: BTreeMap<usize, (Connection, Receiver<IncomingMsg>)>,
+    // pub incoming_conns: Arc<RwLock<IncomingConnections>>,
+    incoming_conns_handle: JoinHandle<()>,
+    connection_pool: BTreeMap<SocketAddr, (Connection, Receiver<IncomingMsg>)>,
 }
 
 type IncomingMsg = Result<(CommsMessage, Option<SendStream>), CommsError>;
@@ -43,24 +52,66 @@ impl IncomingConnections {
 }
 
 impl Comms {
-    pub fn new_node() -> Result<Self, CommsError> {
-        let (endpoint, incoming_conns) = Builder::new().server()?;
+    pub async fn new_node(addr: SocketAddr, event_tx: Sender<NodeMessage>) -> Result<Self, CommsError> {
+        let (endpoint, incoming_connections) = Builder::new()
+            .addr(addr)
+            .idle_timeout(IDLE_TIMEOUT as u32)
+            .server()?;
+
+        let incoming_conns_handle = Self::listen(incoming_connections, event_tx).await;
 
         Ok(Comms {
             quinn_endpoint: endpoint,
-            incoming_conns,
+            // incoming_conns: incoming_conns_locked,
+            incoming_conns_handle,
             connection_pool: BTreeMap::new(),
+        })
+    }
+
+    pub fn local_address(&self) -> Result<SocketAddr, CommsError> {
+        self.quinn_endpoint
+            .local_addr()
+            .map_err(|e| CommsError::Io(e.to_string()))
+    }
+
+    pub async fn listen(mut incoming_conns: IncomingConnections, event_tx: Sender<NodeMessage>) -> JoinHandle<()> {
+        println!("Starting to listen!");
+        tokio::spawn(async move {
+            println!("Awaiting message!");
+            while let Ok((connection, mut incoming_msg)) = incoming_conns.try_recv()
+            {
+                let msg = match incoming_msg.try_recv() {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        println!("Received error when reading message {e:?}");
+                        continue;
+                    }
+                };
+
+                match msg {
+                    Ok((comms_message, resp_stream)) => {
+                        let payload = comms_message.get_payload();
+                        let message = String::from_utf8(payload.to_vec()).unwrap();
+                        let event = NodeMessage::String(message);
+                        event_tx.send(event).await.unwrap();
+                        continue;
+                    }
+                    Err(e) => {
+                        println!("Received error when opening reading message");
+                    }
+                }
+            }
         })
     }
 
     /// Attempt a connection to a node_addr.
     ///
     /// It will always try to open a new connection.
-    async fn new_connection(&mut self, node_addr: &SocketAddr) {
-        trace!("Attempting to connect to {:?}", node_addr);
+    pub async fn new_connection(&mut self, node_addr: &SocketAddr) {
+        println!("Attempting to connect to {:?}", node_addr);
         let connecting = match self.quinn_endpoint.connect(*node_addr, SERVER_NAME) {
             Err(error) => {
-                error!(
+                println!(
                     "Connection attempt to {node_addr:?} failed due to {:?}",
                     error
                 );
@@ -76,18 +127,29 @@ impl Comms {
                     Result<(CommsMessage, Option<SendStream>), CommsError>,
                 >(CHANNEL_SIZE);
                 listen_on_bi_streams(new_conn.clone(), peer_connection_tx);
-
-                trace!(
+                println!(
                     "Successfully connected to peer {node_addr}, conn_id={}",
                     new_conn.stable_id()
                 );
 
                 // Add this connection to the pool
                 self.connection_pool
-                    .insert(conn_id, (new_conn, peer_connection_rx));
+                    .insert(new_conn.remote_address(), (new_conn, peer_connection_rx));
             }
-            Err(error) => error!("Error {error:?} when connecting to given address {node_addr:?}"),
+            Err(error) => {
+                println!("Error {error:?} when connecting to given address {node_addr:?}")
+            }
         }
+    }
+
+    pub async fn send_message_to(
+        &self,
+        addr: SocketAddr,
+        payload: Bytes,
+    ) -> Result<(), CommsError> {
+        let (mut send_str, recv_str) = self.open_bi(addr).await?;
+        let message = CommsMessage::new(payload)?;
+        message.write_to_stream(&mut send_str).await
     }
 
     /// Open a bidirectional stream to the peer.
@@ -96,10 +158,10 @@ impl Comms {
     /// automatically correlate response messages, for example.
     ///
     /// Messages sent over the stream will arrive at the peer in the order they were sent.
-    pub async fn open_bi(&self, peer_id: usize) -> Result<(SendStream, RecvStream), CommsError> {
+    pub async fn open_bi(&self, addr: SocketAddr) -> Result<(SendStream, RecvStream), CommsError> {
         let peer_connection = self
             .connection_pool
-            .get(&peer_id)
+            .get(&addr)
             .ok_or(CommsError::PeerNotFound)?;
         let (send_stream, recv_stream) = peer_connection
             .0

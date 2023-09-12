@@ -42,6 +42,42 @@ impl Builder {
         Self::default()
     }
 
+    /// Local address passed to [`quinn::Endpoint::server`].
+    pub fn addr(mut self, addr: impl Into<SocketAddr>) -> Self {
+        self.addr = addr.into();
+        self
+    }
+
+    /// Maximum time before timeout. Takes time in milliseconds.
+    ///
+    /// Maps to [`quinn::TransportConfig::max_idle_timeout`].
+    pub fn idle_timeout(mut self, to: impl Into<Option<u32>>) -> Self {
+        self.max_idle_timeout = to.into().map(|v| IdleTimeout::from(VarInt::from_u32(v)));
+        self
+    }
+
+    /// Takes time in milliseconds.
+    ///
+    /// Maps to [`quinn::TransportConfig::max_concurrent_bidi_streams`].
+    pub fn max_concurrent_bidi_streams(mut self, max: u32) -> Self {
+        self.max_concurrent_bidi_streams = VarInt::from_u32(max);
+        self
+    }
+
+    /// Takes time in milliseconds.
+    ///
+    /// Maps to [`quinn::TransportConfig::max_concurrent_uni_streams`].
+    pub fn max_concurrent_uni_streams(mut self, max: u32) -> Self {
+        self.max_concurrent_uni_streams = VarInt::from_u32(max);
+        self
+    }
+
+    /// Maps to [`quinn::TransportConfig::keep_alive_interval`].
+    pub fn keep_alive_interval(mut self, interval: impl Into<Option<Duration>>) -> Self {
+        self.keep_alive_interval = interval.into();
+        self
+    }
+
     /// Instantiate a server (peer) [`quinn::Endpoint`] using the parameters passed to this builder.
     pub fn server(self) -> Result<(Endpoint, IncomingConnections), CommsError> {
         let (cfg_srv, cfg_cli) = self.config()?;
@@ -148,23 +184,23 @@ fn listen_for_incoming_connections(
                                 CHANNEL_SIZE,
                             );
                         listen_on_bi_streams(connection.clone(), peer_connection_tx);
-                        trace!("Incoming new connection conn_id={conn_id}");
+                        println!("Incoming new connection conn_id={conn_id}");
                         if conn_sender
                             .send((connection, peer_connection_rx))
                             .await
                             .is_err()
                         {
-                            warn!("Dropping incoming connection conn_id={conn_id}, because receiver was dropped");
+                            println!("Dropping incoming connection conn_id={conn_id}, because receiver was dropped");
                         }
                     }
                     Err(err) => {
-                        warn!("An incoming connection failed because of: {:?}", err);
+                        println!("An incoming connection failed because of: {:?}", err);
                     }
                 }
             });
         }
 
-        trace!(
+        println!(
             "quinn::Endpoint::accept() returned None. There will be no more incoming connections"
         );
     });

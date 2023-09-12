@@ -1,5 +1,15 @@
-pub type Result<T> = std::result::Result<T, WrapperError>;
+use crate::CommsError;
 
-pub enum WrapperError {
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug)]
+pub enum Error {
     Generic(String),
+    CommsError(CommsError),
+}
+
+impl From<CommsError> for Error {
+    fn from(value: CommsError) -> Self {
+        Error::CommsError(value)
+    }
 }

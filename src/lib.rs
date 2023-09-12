@@ -1,8 +1,11 @@
 #![allow(dead_code, missing_docs)]
 
 mod comms;
-mod eiger_node;
-mod error;
+pub mod error;
+mod message;
+pub mod node;
+
+pub use crate::comms::CommsError;
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right

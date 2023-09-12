@@ -46,7 +46,7 @@ impl CommsMessage {
         })
     }
 
-    // Helper to write WireMsg bytes to the provided stream.
+    // Helper to write CommsMessage bytes to the provided stream.
     pub(crate) async fn write_to_stream(
         &self,
         send_stream: &mut quinn::SendStream,
@@ -69,6 +69,10 @@ impl CommsMessage {
             .map_err(|e| CommsError::SendFailed(e.to_string()))?;
 
         Ok(())
+    }
+
+    pub fn get_payload(&self) -> Bytes {
+        self.payload.clone()
     }
 }
 

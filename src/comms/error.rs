@@ -15,4 +15,5 @@ pub enum CommsError {
     BiConnectFailed(String),
     BadCertificate(String),
     Connection(String),
+    Io(String),
 }
