@@ -1,3 +1,7 @@
+mod eiger_node;
+mod error;
+mod comms;
+
 pub fn add(left: usize, right: usize) -> usize {
     left + right
 }
