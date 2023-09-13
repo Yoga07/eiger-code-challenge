@@ -6,16 +6,17 @@ pub use error::CommsError;
 
 use crate::comms::builder::{Builder, SERVER_NAME};
 use crate::comms::message::CommsMessage;
+use crate::message::NodeMessage;
 use bytes::Bytes;
 use quinn::{Connection, RecvStream, SendStream};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{RwLock, RwLockWriteGuard};
+use tokio::sync::{Mutex, RwLock, RwLockWriteGuard};
 use tokio::task::JoinHandle;
+use tokio::time::{sleep, Duration};
 use tracing::{error, trace};
-use crate::message::NodeMessage;
 
 /// Channel bounds
 pub(crate) const CHANNEL_SIZE: usize = 10_000;
@@ -24,9 +25,8 @@ pub(crate) const IDLE_TIMEOUT: usize = 60 * 60 * 1_000; // 3600s
 
 pub struct Comms {
     quinn_endpoint: quinn::Endpoint,
-    // pub incoming_conns: Arc<RwLock<IncomingConnections>>,
-    incoming_conns_handle: JoinHandle<()>,
-    connection_pool: BTreeMap<SocketAddr, (Connection, Receiver<IncomingMsg>)>,
+    incoming_conns: Arc<Mutex<IncomingConnections>>,
+    connection_pool: Arc<Mutex<BTreeMap<SocketAddr, (Connection, Receiver<IncomingMsg>)>>>,
 }
 
 type IncomingMsg = Result<(CommsMessage, Option<SendStream>), CommsError>;
@@ -52,20 +52,28 @@ impl IncomingConnections {
 }
 
 impl Comms {
-    pub async fn new_node(addr: SocketAddr, event_tx: Sender<NodeMessage>) -> Result<Self, CommsError> {
+    pub async fn new_node(
+        addr: SocketAddr,
+        event_tx: Sender<NodeMessage>,
+    ) -> Result<Self, CommsError> {
         let (endpoint, incoming_connections) = Builder::new()
             .addr(addr)
             .idle_timeout(IDLE_TIMEOUT as u32)
             .server()?;
 
-        let incoming_conns_handle = Self::listen(incoming_connections, event_tx).await;
+        let incoming_arced = Arc::new(Mutex::new(incoming_connections));
 
-        Ok(Comms {
+        let comms = Comms {
             quinn_endpoint: endpoint,
-            // incoming_conns: incoming_conns_locked,
-            incoming_conns_handle,
-            connection_pool: BTreeMap::new(),
-        })
+            incoming_conns: incoming_arced,
+            connection_pool: Arc::new(Mutex::new(BTreeMap::new())),
+        };
+
+        comms.listen_on_endpoint(event_tx.clone()).await;
+
+        comms.listen_to_connection_pool(event_tx).await;
+
+        Ok(comms)
     }
 
     pub fn local_address(&self) -> Result<SocketAddr, CommsError> {
@@ -74,34 +82,63 @@ impl Comms {
             .map_err(|e| CommsError::Io(e.to_string()))
     }
 
-    pub async fn listen(mut incoming_conns: IncomingConnections, event_tx: Sender<NodeMessage>) -> JoinHandle<()> {
+    pub async fn listen_on_endpoint(&self, event_tx: Sender<NodeMessage>) {
+        let mut incoming_conns = self.incoming_conns.clone();
+        let mut connection_pool = self.connection_pool.clone();
         println!("Starting to listen!");
-        tokio::spawn(async move {
+        let _handle = tokio::spawn(async move {
             println!("Awaiting message!");
-            while let Ok((connection, mut incoming_msg)) = incoming_conns.try_recv()
+            while let Some((connection, mut incoming_msg)) =
+                incoming_conns.lock().await.next().await
             {
-                let msg = match incoming_msg.try_recv() {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        println!("Received error when reading message {e:?}");
-                        continue;
-                    }
-                };
+                println!("New connection received!");
 
-                match msg {
-                    Ok((comms_message, resp_stream)) => {
-                        let payload = comms_message.get_payload();
-                        let message = String::from_utf8(payload.to_vec()).unwrap();
-                        let event = NodeMessage::String(message);
-                        event_tx.send(event).await.unwrap();
-                        continue;
-                    }
-                    Err(e) => {
-                        println!("Received error when opening reading message");
+                // insert into connection pool
+                connection_pool
+                    .lock()
+                    .await
+                    .insert(connection.remote_address(), (connection, incoming_msg));
+                println!("Inserted new conn!");
+            }
+        });
+    }
+
+    pub async fn listen_to_connection_pool(&self, event_tx: Sender<NodeMessage>) {
+        let all_receivers = self.connection_pool.clone();
+        let _handle = tokio::spawn(async move {
+            loop {
+                for (conns, ref mut receiver) in all_receivers.lock().await.values_mut() {
+                    println!("Iterating receiver for addr: {:?}", conns.remote_address());
+                    let msg = match receiver.recv().await {
+                        Some(msg) => {
+                            println!("Recevied new msg on connection pool!");
+                            msg
+                        }
+                        None => {
+                            println!("Received error when reading message");
+                            continue;
+                        }
+                    };
+
+                    match msg {
+                        Ok((comms_message, resp_stream)) => {
+                            let payload = comms_message.get_payload();
+                            let message = String::from_utf8(payload.to_vec()).unwrap();
+                            println!("Received string {message:?}");
+                            let event = NodeMessage::String(message);
+                            event_tx.send(event).await.unwrap();
+                            continue;
+                        }
+                        Err(e) => {
+                            println!("Received error when opening reading message");
+                        }
                     }
                 }
+
+                // Polling interval
+                sleep(Duration::from_secs(1)).await;
             }
-        })
+        });
     }
 
     /// Attempt a connection to a node_addr.
@@ -134,6 +171,8 @@ impl Comms {
 
                 // Add this connection to the pool
                 self.connection_pool
+                    .lock()
+                    .await
                     .insert(new_conn.remote_address(), (new_conn, peer_connection_rx));
             }
             Err(error) => {
@@ -159,10 +198,9 @@ impl Comms {
     ///
     /// Messages sent over the stream will arrive at the peer in the order they were sent.
     pub async fn open_bi(&self, addr: SocketAddr) -> Result<(SendStream, RecvStream), CommsError> {
-        let peer_connection = self
-            .connection_pool
-            .get(&addr)
-            .ok_or(CommsError::PeerNotFound)?;
+        let conn_pool = self.connection_pool.lock().await;
+
+        let peer_connection = conn_pool.get(&addr).ok_or(CommsError::PeerNotFound)?;
         let (send_stream, recv_stream) = peer_connection
             .0
             .open_bi()

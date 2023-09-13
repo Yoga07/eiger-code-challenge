@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 use tracing::error;
 
 pub struct Node {
+    addr: SocketAddr,
     comms: Arc<RwLock<Comms>>,
     event_rx: Arc<RwLock<Receiver<NodeMessage>>>,
 }
@@ -18,11 +19,15 @@ impl Node {
     pub async fn new(addr: SocketAddr) -> Result<Self> {
         let (event_tx, event_rx) = channel::<NodeMessage>(CHANNEL_SIZE);
 
-        let comms = Comms::new_node(addr, event_tx).await.map_err(|e| Error::CommsError(e))?;
+        let comms = Comms::new_node(addr, event_tx)
+            .await
+            .map_err(|e| Error::CommsError(e))?;
         println!("Started node at {}", comms.local_address()?);
 
+        let addr = comms.local_address()?;
 
         let node = Node {
+            addr,
             comms: Arc::new(RwLock::new(comms)),
             event_rx: Arc::new(RwLock::new(event_rx)),
         };
@@ -45,9 +50,10 @@ impl Node {
 
     pub async fn start_event_loop(&self) {
         let event_rx = self.event_rx.clone();
+        let addr = self.addr.clone();
         let _handle = tokio::spawn(async move {
-            println!("Starting event loop!");
-            while let Ok(event) = event_rx.write().await.try_recv() {
+            println!("Starting event loop! for {:?}", addr);
+            while let Some(event) = event_rx.write().await.recv().await {
                 println!("Received an EVENT!");
                 println!("{event:?}");
                 continue;
