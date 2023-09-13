@@ -1,4 +1,4 @@
 #[derive(Debug)]
-pub enum NodeMessage {
+pub enum Event {
     String(String),
 }

@@ -1,6 +1,6 @@
 use crate::comms::{Comms, CHANNEL_SIZE};
 use crate::error::{Error, Result};
-use crate::message::NodeMessage;
+use crate::message::Event;
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::ptr::write;
@@ -12,12 +12,12 @@ use tracing::error;
 pub struct Node {
     addr: SocketAddr,
     comms: Arc<RwLock<Comms>>,
-    event_rx: Arc<RwLock<Receiver<NodeMessage>>>,
+    event_rx: Arc<RwLock<Receiver<Event>>>,
 }
 
 impl Node {
     pub async fn new(addr: SocketAddr) -> Result<Self> {
-        let (event_tx, event_rx) = channel::<NodeMessage>(CHANNEL_SIZE);
+        let (event_tx, event_rx) = channel::<Event>(CHANNEL_SIZE);
 
         let comms = Comms::new_node(addr, event_tx)
             .await
@@ -31,8 +31,6 @@ impl Node {
             comms: Arc::new(RwLock::new(comms)),
             event_rx: Arc::new(RwLock::new(event_rx)),
         };
-
-        node.start_event_loop().await;
 
         Ok(node)
     }
@@ -51,13 +49,9 @@ impl Node {
     pub async fn start_event_loop(&self) {
         let event_rx = self.event_rx.clone();
         let addr = self.addr.clone();
-        let _handle = tokio::spawn(async move {
-            println!("Starting event loop! for {:?}", addr);
-            while let Some(event) = event_rx.write().await.recv().await {
-                println!("Received an EVENT!");
-                println!("{event:?}");
-                continue;
-            }
-        });
+        while let Some(event) = event_rx.write().await.recv().await {
+            println!("Received an EVENT!");
+            println!("{event:?}");
+        }
     }
 }

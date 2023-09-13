@@ -10,7 +10,9 @@ async fn main() {
     let address1 = SocketAddr::from_str("127.0.0.1:5000").unwrap();
     let _handle = tokio::spawn(async move {
         let _node = match Node::new(address1).await {
-            Ok(node) => loop {},
+            Ok(node) => loop {
+                node.start_event_loop().await;
+            },
             Err(e) => {
                 println!("Error starting node {e:?}");
                 return;
@@ -19,10 +21,8 @@ async fn main() {
     });
 
     let address2 = SocketAddr::from_str("127.0.0.1:5001").unwrap();
-    // let handle = tokio::spawn(async move {
     let _node2 = match Node::new(address2).await {
         Ok(mut node2) => {
-            println!("looping 2");
             node2.connect_to(address1).await;
             loop {
                 node2
@@ -37,5 +37,4 @@ async fn main() {
             return;
         }
     };
-    // });
 }

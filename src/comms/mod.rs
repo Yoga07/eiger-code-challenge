@@ -3,19 +3,19 @@ mod error;
 mod message;
 
 pub use error::CommsError;
+use std::collections::btree_map::BTreeMap;
 
 use crate::comms::builder::{Builder, SERVER_NAME};
 use crate::comms::message::CommsMessage;
-use crate::message::NodeMessage;
+use crate::message::Event;
 use bytes::Bytes;
 use quinn::{Connection, RecvStream, SendStream};
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock, RwLockWriteGuard};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tracing::{error, trace};
 
 /// Channel bounds
@@ -54,7 +54,7 @@ impl IncomingConnections {
 impl Comms {
     pub async fn new_node(
         addr: SocketAddr,
-        event_tx: Sender<NodeMessage>,
+        event_tx: Sender<Event>,
     ) -> Result<Self, CommsError> {
         let (endpoint, incoming_connections) = Builder::new()
             .addr(addr)
@@ -82,7 +82,7 @@ impl Comms {
             .map_err(|e| CommsError::Io(e.to_string()))
     }
 
-    pub async fn listen_on_endpoint(&self, event_tx: Sender<NodeMessage>) {
+    pub async fn listen_on_endpoint(&self, event_tx: Sender<Event>) {
         let mut incoming_conns = self.incoming_conns.clone();
         let mut connection_pool = self.connection_pool.clone();
         println!("Starting to listen!");
@@ -103,40 +103,44 @@ impl Comms {
         });
     }
 
-    pub async fn listen_to_connection_pool(&self, event_tx: Sender<NodeMessage>) {
+    pub async fn listen_to_connection_pool(&self, event_tx: Sender<Event>) {
         let all_receivers = self.connection_pool.clone();
+        let addr = self.quinn_endpoint.local_addr().unwrap();
         let _handle = tokio::spawn(async move {
             loop {
                 for (conns, ref mut receiver) in all_receivers.lock().await.values_mut() {
-                    println!("Iterating receiver for addr: {:?}", conns.remote_address());
-                    let msg = match receiver.recv().await {
-                        Some(msg) => {
-                            println!("Recevied new msg on connection pool!");
-                            msg
-                        }
-                        None => {
-                            println!("Received error when reading message");
+                    let msg =
+                        if let Ok(msg) = timeout(Duration::from_millis(1), receiver.recv()).await {
+                            match msg {
+                                Some(msg) => {
+                                    println!("Recevied new msg on connection pool!");
+                                    msg
+                                }
+                                None => {
+                                    println!("Received error when reading message");
+                                    continue;
+                                }
+                            }
+                        } else {
                             continue;
-                        }
-                    };
+                        };
 
                     match msg {
                         Ok((comms_message, resp_stream)) => {
                             let payload = comms_message.get_payload();
                             let message = String::from_utf8(payload.to_vec()).unwrap();
-                            println!("Received string {message:?}");
-                            let event = NodeMessage::String(message);
+                            let event = Event::String(message);
                             event_tx.send(event).await.unwrap();
                             continue;
                         }
                         Err(e) => {
-                            println!("Received error when opening reading message");
+                            println!("Received error when opening message");
                         }
                     }
                 }
 
                 // Polling interval
-                sleep(Duration::from_secs(1)).await;
+                sleep(Duration::from_millis(1)).await;
             }
         });
     }
@@ -198,9 +202,12 @@ impl Comms {
     ///
     /// Messages sent over the stream will arrive at the peer in the order they were sent.
     pub async fn open_bi(&self, addr: SocketAddr) -> Result<(SendStream, RecvStream), CommsError> {
+        println!("Opening bi stream from connection pool");
         let conn_pool = self.connection_pool.lock().await;
+        println!("Awaiting lock on conn pool");
 
         let peer_connection = conn_pool.get(&addr).ok_or(CommsError::PeerNotFound)?;
+        println!("Opening bi stream");
         let (send_stream, recv_stream) = peer_connection
             .0
             .open_bi()
@@ -251,7 +258,7 @@ pub fn listen_on_bi_streams(connection: Connection, tx: Sender<IncomingMsg>) {
                 let msg = msg.map(|msg| (msg, Some(send)));
                 // Send away the msg or error
                 reserved_sender.send(msg);
-                trace!("Upper layer notified of new messages");
+                println!("Upper layer notified of new messages");
             });
         }
 
