@@ -7,7 +7,8 @@ use std::collections::btree_map::BTreeMap;
 
 use crate::comms::builder::{Builder, SERVER_NAME};
 use crate::comms::message::CommsMessage;
-use crate::message::Event;
+use crate::event::Event;
+use bincode::deserialize;
 use bytes::Bytes;
 use quinn::{Connection, RecvStream, SendStream};
 use std::net::SocketAddr;
@@ -121,8 +122,7 @@ impl Comms {
                     match msg {
                         Ok((comms_message, _resp_stream)) => {
                             let payload = comms_message.get_payload();
-                            let message = String::from_utf8(payload.to_vec()).unwrap();
-                            let event = Event::String(message);
+                            let event: Event = deserialize(&payload).unwrap();
                             event_tx.send(event).await.unwrap();
                             continue;
                         }

@@ -2,10 +2,12 @@
 
 mod comms;
 pub mod error;
-mod message;
+mod event;
+mod handshake;
 pub mod node;
 
 pub use crate::comms::CommsError;
+pub use event::Event;
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right
