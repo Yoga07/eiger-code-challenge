@@ -127,7 +127,7 @@ fn config() -> Result<(quinn::ServerConfig, quinn::ClientConfig), CommsError> {
         .with_no_client_auth();
 
     // NOTE: This is just a placeholder
-    // allow client to connect to unknown certificates, eg those generated above
+    // Allows client to connect to unknown certificates, eg those generated above
     client_crypto
         .dangerous()
         .set_certificate_verifier(Arc::new(SkipServerVerification));
@@ -151,6 +151,7 @@ fn generate_cert() -> Result<(rustls::Certificate, rustls::PrivateKey), rcgen::R
 }
 
 // Implementation of `ServerCertVerifier` that verifies everything as trustworthy.
+// This is done to skip the client set up in quinn.
 struct SkipServerVerification;
 
 impl rustls::client::ServerCertVerifier for SkipServerVerification {

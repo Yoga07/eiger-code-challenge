@@ -52,7 +52,10 @@ impl IncomingConnections {
 }
 
 impl Comms {
-    pub async fn new_node(addr: SocketAddr, event_tx: Sender<Event>) -> Result<Self, CommsError> {
+    pub async fn new_node(
+        addr: SocketAddr,
+        event_tx: Sender<(SocketAddr, Event)>,
+    ) -> Result<Self, CommsError> {
         let (endpoint, incoming_connections) = Builder::new()
             .addr(addr)
             .idle_timeout(IDLE_TIMEOUT as u32)
@@ -98,11 +101,11 @@ impl Comms {
         });
     }
 
-    pub async fn listen_to_connection_pool(&self, event_tx: Sender<Event>) {
+    pub async fn listen_to_connection_pool(&self, event_tx: Sender<(SocketAddr, Event)>) {
         let all_receivers = self.connection_pool.clone();
         let _handle = tokio::spawn(async move {
             loop {
-                for (_conns, ref mut receiver) in all_receivers.lock().await.values_mut() {
+                for (connection, ref mut receiver) in all_receivers.lock().await.values_mut() {
                     let msg =
                         if let Ok(msg) = timeout(Duration::from_millis(1), receiver.recv()).await {
                             match msg {
@@ -122,8 +125,9 @@ impl Comms {
                     match msg {
                         Ok((comms_message, _resp_stream)) => {
                             let payload = comms_message.get_payload();
+                            let peer_addr = connection.remote_address();
                             let event: Event = deserialize(&payload).unwrap();
-                            event_tx.send(event).await.unwrap();
+                            event_tx.send((peer_addr, event)).await.unwrap();
                             continue;
                         }
                         Err(e) => {

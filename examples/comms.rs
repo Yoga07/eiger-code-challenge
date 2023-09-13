@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use eiger_code_challenge::node::Node;
 use eiger_code_challenge::Event;
 use std::net::SocketAddr;
