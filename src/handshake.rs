@@ -1,14 +1,23 @@
 use crate::error::{Error, Result};
-use aes_gcm::KeyInit;
+use aes_gcm::aead::{Aead, Nonce};
+use aes_gcm::{Aes256Gcm, KeyInit};
 use bincode::serialize;
 use bytes::Bytes;
+use sha3::digest::Output;
+use sha3::Sha3_256;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use tokio::sync::mpsc::Sender;
+use tracing::error;
 use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
 
 use crate::event::{Event, HandShakeMessage, HandShakeResponder, HandShakeSender, LocalEvent};
 use crate::node::Node;
+use crate::utils::{hash, Hash};
+
+pub const HANDHSHAKE_PATTERN: &str = "NOISE_XX_SHA256";
+
+pub const INITIAL_NONCE: u8 = 0;
 
 pub struct HandshakeHandler {
     ongoing: BTreeMap<SocketAddr, HandShakeSession>,
@@ -22,6 +31,51 @@ pub struct HandShakeSession {
     our_ephemeral_keypair: Option<(PublicKey, EphemeralSecret)>,
     // Diffie-Hellman Keys
     ephemeral_shared_secret: Option<SharedSecret>,
+    mix_key: Option<Aes256Gcm>,
+    nonce: u8,
+    // Session specifics
+    session_hash: Hash,
+}
+
+impl HandShakeSession {
+    pub fn perform_ephemeral_diffie_hellman(&mut self, their_pk: PublicKey) -> Result<()> {
+        self.peer_ephemeral_pk = Some(their_pk);
+
+        // Start Diffie-Hellman of ephemeral keys
+        let e_keypair = self.our_ephemeral_keypair.take();
+
+        if let Some((e_pub, e_sk)) = e_keypair {
+            let ephemeral_shared_secret = e_sk.diffie_hellman(&their_pk);
+
+            // Split the shared secret into key and nonce
+            let nonce = hash(ephemeral_shared_secret.as_bytes().split_at(16).1)[0]; // First byte of the hash of encyrption key is the nonce
+
+            self.nonce = nonce;
+
+            let cipher =
+                match aes_gcm::Aes256Gcm::new_from_slice(ephemeral_shared_secret.as_bytes()) {
+                    Ok(cipher) => cipher,
+                    Err(e) => {
+                        println!("Error creating cipher from ephemeral_shared_secret");
+                        return Err(Error::HandShake(
+                            "Error creating cipher from ephemeral_shared_secret".to_string(),
+                        ));
+                    }
+                };
+
+            self.ephemeral_shared_secret = Some(ephemeral_shared_secret);
+
+            self.mix_key = Some(cipher);
+        } else {
+            println!("Error when receiving Responder EphemeralPK: No self.ephemeral_sk found");
+            return Err(Error::HandShake(
+                "Error when receiving Responder EphemeralPK: No self.ephemeral_sk found"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 impl HandshakeHandler {
@@ -48,6 +102,9 @@ impl Node {
             peer_static_key: None,
             our_ephemeral_keypair: Some((ephemeral_pk, ephemeral_sk)),
             ephemeral_shared_secret: None,
+            nonce: INITIAL_NONCE,
+            mix_key: None,
+            session_hash: hash(HANDHSHAKE_PATTERN.as_bytes()),
         };
 
         // Insert into our ongoing handshake sessions
@@ -85,7 +142,7 @@ impl Node {
 
                     // Generate our e_pub to be sent
                     let our_ephemeral_sk = EphemeralSecret::random();
-                    let our_ephemeral_pk = PublicKey::from(&ephemeral_sk);
+                    let our_ephemeral_pk = PublicKey::from(&our_ephemeral_sk);
 
                     let mut hss = HandShakeSession {
                         peer_addr: peer,
@@ -93,6 +150,9 @@ impl Node {
                         peer_static_key: None,
                         our_ephemeral_keypair: Some((our_ephemeral_pk, our_ephemeral_sk)),
                         ephemeral_shared_secret: None,
+                        nonce: INITIAL_NONCE,
+                        mix_key: None,
+                        session_hash: hash(HANDHSHAKE_PATTERN.as_bytes()),
                     };
 
                     let msg = Event::LocalEvent(LocalEvent::SendEventTo(
@@ -111,18 +171,15 @@ impl Node {
                         return;
                     }
 
-                    // Start Diffie-Hellman of ephemeral keys
-                    let ephemeral_shared_secret = our_ephemeral_sk.diffie_hellman(&peer_e_pub);
+                    if hss.perform_ephemeral_diffie_hellman(peer_e_pub).is_err() {
+                        return;
+                    }
 
-                    // Split the shared secret into key and nonce
-                    let (encryption_key, nonce) = ephemeral_shared_secret.to_bytes().split_at(16); // You can adjust the sizes as needed
-                    let cipher = match aes_gcm::Aes256Gcm::new_from_slice(encryption_key) {
-                        Ok(cipher) => cipher,
-                        Err(e) => {
-                            println!("Error creating cipher from ephemeral_shared_secret");
-                            return;
-                        }
-                    };
+                    // Generate Static Key
+                    let our_static_sk = StaticSecret::random();
+                    let our_static_pk = PublicKey::from(&our_static_sk);
+
+                    // TODO: Encrypt the Static PK
 
                     // Insert into our ongoing handshake sessions
                     let _ = self
@@ -134,7 +191,32 @@ impl Node {
                 }
             },
             HandShakeMessage::Responder(responder_msg) => match responder_msg {
-                HandShakeResponder::EphemeralPK(e_pub) => {}
+                HandShakeResponder::EphemeralPK(bytes) => {
+                    let peer_e_pub = PublicKey::from(bytes);
+
+                    // Since this is from the responder, we should already have a session going
+                    let mut hss = match self.handshake_handler.write().await.ongoing.remove(&peer) {
+                        Some(session) => session,
+                        None => {
+                            println!(
+                                "Error when receiving Responder EphemeralPK. No session found"
+                            );
+                            return;
+                        }
+                    };
+
+                    if hss.perform_ephemeral_diffie_hellman(peer_e_pub).is_err() {
+                        return;
+                    }
+
+                    // Insert back into our ongoing handshake sessions
+                    let _ = self
+                        .handshake_handler
+                        .write()
+                        .await
+                        .ongoing
+                        .insert(peer, hss);
+                }
                 HandShakeResponder::Static() => {}
             },
         }

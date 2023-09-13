@@ -14,8 +14,6 @@ pub enum LocalEvent {
     SendEventTo(SocketAddr, Box<Event>),
 }
 
-pub const HANDHSHAKE_PATTERN: &str = "NOISE_XX_SHA256";
-
 #[derive(Debug, Serialize, Deserialize)]
 pub enum HandShakeMessage {
     Sender(HandShakeSender),
@@ -30,5 +28,5 @@ pub enum HandShakeSender {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum HandShakeResponder {
     EphemeralPK([u8; 32]),
-    Static(),
+    EncyptedStatic(),
 }

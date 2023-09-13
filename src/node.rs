@@ -31,7 +31,7 @@ impl Node {
 
         let mut comms = Comms::new_node(addr, event_tx.clone())
             .await
-            .map_err(|e| Error::CommsError(e))?;
+            .map_err(|e| Error::Comms(e))?;
 
         println!("Started node at {}", comms.local_address()?);
 

@@ -5,6 +5,7 @@ pub mod error;
 mod event;
 mod handshake;
 pub mod node;
+pub mod utils;
 
 pub use crate::comms::CommsError;
 pub use event::Event;
