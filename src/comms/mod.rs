@@ -13,10 +13,9 @@ use quinn::{Connection, RecvStream, SendStream};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, RwLock, RwLockWriteGuard};
-use tokio::task::JoinHandle;
+use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
-use tracing::{error, trace};
+use tracing::trace;
 
 /// Channel bounds
 pub(crate) const CHANNEL_SIZE: usize = 10_000;
@@ -52,10 +51,7 @@ impl IncomingConnections {
 }
 
 impl Comms {
-    pub async fn new_node(
-        addr: SocketAddr,
-        event_tx: Sender<Event>,
-    ) -> Result<Self, CommsError> {
+    pub async fn new_node(addr: SocketAddr, event_tx: Sender<Event>) -> Result<Self, CommsError> {
         let (endpoint, incoming_connections) = Builder::new()
             .addr(addr)
             .idle_timeout(IDLE_TIMEOUT as u32)
@@ -69,7 +65,7 @@ impl Comms {
             connection_pool: Arc::new(Mutex::new(BTreeMap::new())),
         };
 
-        comms.listen_on_endpoint(event_tx.clone()).await;
+        comms.listen_on_endpoint().await;
 
         comms.listen_to_connection_pool(event_tx).await;
 
@@ -82,15 +78,13 @@ impl Comms {
             .map_err(|e| CommsError::Io(e.to_string()))
     }
 
-    pub async fn listen_on_endpoint(&self, event_tx: Sender<Event>) {
-        let mut incoming_conns = self.incoming_conns.clone();
-        let mut connection_pool = self.connection_pool.clone();
+    pub async fn listen_on_endpoint(&self) {
+        let incoming_conns = self.incoming_conns.clone();
+        let connection_pool = self.connection_pool.clone();
         println!("Starting to listen!");
         let _handle = tokio::spawn(async move {
             println!("Awaiting message!");
-            while let Some((connection, mut incoming_msg)) =
-                incoming_conns.lock().await.next().await
-            {
+            while let Some((connection, incoming_msg)) = incoming_conns.lock().await.next().await {
                 println!("New connection received!");
 
                 // insert into connection pool
@@ -105,10 +99,9 @@ impl Comms {
 
     pub async fn listen_to_connection_pool(&self, event_tx: Sender<Event>) {
         let all_receivers = self.connection_pool.clone();
-        let addr = self.quinn_endpoint.local_addr().unwrap();
         let _handle = tokio::spawn(async move {
             loop {
-                for (conns, ref mut receiver) in all_receivers.lock().await.values_mut() {
+                for (_conns, ref mut receiver) in all_receivers.lock().await.values_mut() {
                     let msg =
                         if let Ok(msg) = timeout(Duration::from_millis(1), receiver.recv()).await {
                             match msg {
@@ -126,7 +119,7 @@ impl Comms {
                         };
 
                     match msg {
-                        Ok((comms_message, resp_stream)) => {
+                        Ok((comms_message, _resp_stream)) => {
                             let payload = comms_message.get_payload();
                             let message = String::from_utf8(payload.to_vec()).unwrap();
                             let event = Event::String(message);
@@ -134,7 +127,7 @@ impl Comms {
                             continue;
                         }
                         Err(e) => {
-                            println!("Received error when opening message");
+                            println!("Received error when opening message {e:?}");
                         }
                     }
                 }
@@ -168,10 +161,7 @@ impl Comms {
                     Result<(CommsMessage, Option<SendStream>), CommsError>,
                 >(CHANNEL_SIZE);
                 listen_on_bi_streams(new_conn.clone(), peer_connection_tx);
-                println!(
-                    "Successfully connected to peer {node_addr}, conn_id={}",
-                    new_conn.stable_id()
-                );
+                println!("Successfully connected to peer {node_addr}, conn_id={conn_id}",);
 
                 // Add this connection to the pool
                 self.connection_pool
@@ -190,7 +180,7 @@ impl Comms {
         addr: SocketAddr,
         payload: Bytes,
     ) -> Result<(), CommsError> {
-        let (mut send_str, recv_str) = self.open_bi(addr).await?;
+        let (mut send_str, _recv_str) = self.open_bi(addr).await?;
         let message = CommsMessage::new(payload)?;
         message.write_to_stream(&mut send_str).await
     }

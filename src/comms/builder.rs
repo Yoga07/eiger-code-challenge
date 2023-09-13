@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tracing::{trace, warn};
+// use tracing::{trace, warn};
 
 pub(crate) const DEFAULT_IDLE_TIMEOUT: u32 = 10_000; // 10s
 

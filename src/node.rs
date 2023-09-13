@@ -3,11 +3,10 @@ use crate::error::{Error, Result};
 use crate::message::Event;
 use bytes::Bytes;
 use std::net::SocketAddr;
-use std::ptr::write;
 use std::sync::Arc;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{channel, Receiver};
 use tokio::sync::RwLock;
-use tracing::error;
+// use tracing::error;
 
 pub struct Node {
     addr: SocketAddr,
@@ -48,7 +47,6 @@ impl Node {
 
     pub async fn start_event_loop(&self) {
         let event_rx = self.event_rx.clone();
-        let addr = self.addr.clone();
         while let Some(event) = event_rx.write().await.recv().await {
             println!("Received an EVENT!");
             println!("{event:?}");
