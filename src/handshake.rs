@@ -6,6 +6,7 @@ use bincode::{deserialize, serialize};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use tokio::sync::mpsc::Sender;
+use tracing::error;
 use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
 
 use crate::event::{
@@ -14,9 +15,13 @@ use crate::event::{
 use crate::node::Node;
 use crate::utils::{hash, Hash};
 
+/// Name of the handshake pattern we use
 pub const HANDHSHAKE_PATTERN: &str = "NOISE_XX_SHA256";
 
+/// Initial nonce to use during Handshake
 pub const INITIAL_NONCE: [u8; 12] = [0u8; 12];
+
+pub const DH_KEY_SIZE: usize = 32;
 
 pub struct HandshakeHandler {
     ongoing: BTreeMap<SocketAddr, HandShakeSession>,
@@ -31,7 +36,7 @@ pub struct HandShakeSession {
     our_static_keys: Option<(PublicKey, StaticSecret)>,
     // Diffie-Hellman Keys
     ephemeral_shared_secret: Option<SharedSecret>,
-    mix_key: Option<Aes256Gcm>,
+    symmetric_key: Option<Aes256Gcm>,
     nonce: Vec<u8>,
     // Session specifics
     session_hash: Hash,
@@ -64,7 +69,7 @@ impl HandShakeSession {
 
             self.ephemeral_shared_secret = Some(ephemeral_shared_secret);
 
-            self.mix_key = Some(cipher);
+            self.symmetric_key = Some(cipher);
         } else {
             println!("Error when receiving Responder EphemeralPK: No self.ephemeral_sk found");
             return Err(Error::HandShake(
@@ -104,7 +109,7 @@ impl Node {
             our_ephemeral_keypair: Some((ephemeral_pk, ephemeral_sk)),
             ephemeral_shared_secret: None,
             nonce: INITIAL_NONCE.to_vec(),
-            mix_key: None,
+            symmetric_key: None,
             session_hash: hash(HANDHSHAKE_PATTERN.as_bytes()),
         };
 
@@ -155,7 +160,7 @@ impl Node {
                         our_ephemeral_keypair: Some((our_ephemeral_pk, our_ephemeral_sk)),
                         ephemeral_shared_secret: None,
                         nonce: INITIAL_NONCE.to_vec(),
-                        mix_key: None,
+                        symmetric_key: None,
                         session_hash: hash(HANDHSHAKE_PATTERN.as_bytes()),
                     };
 
@@ -176,90 +181,97 @@ impl Node {
                         return;
                     }
 
-                    println!("[{addr:?}] Running dhee");
+                    println!("[{addr:?}] Running dhee as Responder");
                     if hss.perform_ephemeral_diffie_hellman(peer_e_pub).is_err() {
                         return;
                     }
-
-                    let notifier = SessionState::EphemeralDHEEDone;
-                    self.send_hs_notifier(&hss, event_tx.clone(), peer, notifier)
-                        .await;
 
                     // Insert into our ongoing handshake sessions
                     let _ = hs_handler.ongoing.insert(peer, hss);
                 }
             },
-            HandShakeMessage::Responder(responder_msg) => match responder_msg {
-                HandShakeResponder::EphemeralPK(bytes) => {
-                    println!("[{addr:?}] Received e_pub from Responder");
-                    let peer_e_pub = PublicKey::from(bytes);
+            HandShakeMessage::Responder(responder_msg) => {
+                match responder_msg {
+                    HandShakeResponder::EphemeralPK(bytes) => {
+                        println!("[{addr:?}] Received e_pub from Responder");
+                        let peer_e_pub = PublicKey::from(bytes);
 
-                    println!("[{addr:?}] Running DHEE at Sender");
-                    // Since this is from the responder, we should already have a session going
-                    let mut hss = match hs_handler.ongoing.remove(&peer) {
-                        Some(session) => session,
-                        None => {
-                            println!(
-                                "Error when receiving Responder EphemeralPK. No session found"
-                            );
+                        // Since this is from the responder, we should already have a session going
+                        let mut hss = match hs_handler.ongoing.remove(&peer) {
+                            Some(session) => session,
+                            None => {
+                                println!(
+                                    "Error when receiving Responder EphemeralPK. No session found"
+                                );
+                                return;
+                            }
+                        };
+
+                        println!("[{addr:?}] Running DHEE at Sender");
+                        if hss.perform_ephemeral_diffie_hellman(peer_e_pub).is_err() {
                             return;
                         }
-                    };
 
-                    if hss.perform_ephemeral_diffie_hellman(peer_e_pub).is_err() {
-                        return;
+                        let notifier = SessionState::EphemeralDHEEDone;
+                        self.send_hs_notifier(&hss, event_tx.clone(), peer, notifier)
+                            .await;
+
+                        // Insert back into our ongoing handshake sessions
+                        let _ = hs_handler.ongoing.insert(peer, hss);
                     }
+                    HandShakeResponder::EncyptedStatic(their_enc_static) => {
+                        println!("[{addr:?}] RECEIVED THEIR ENCRYPTED STATIC!!!!!!!!!!!!!!!!!!!");
 
-                    println!("Inserting into our sessions");
-
-                    // Insert back into our ongoing handshake sessions
-                    let _ = hs_handler.ongoing.insert(peer, hss);
-
-                    println!("DONE Inserting into our sessions");
-                }
-                HandShakeResponder::EncyptedStatic(their_enc_static) => {
-                    println!("[{addr:?}] RECEIVED THEIR ENCRYPTED STATIC!!!!!!!!!!!!!!!!!!!");
-
-                    let mut hss = match hs_handler.ongoing.remove(&peer) {
-                        Some(session) => session,
-                        None => {
-                            println!(
+                        let mut hss = match hs_handler.ongoing.remove(&peer) {
+                            Some(session) => session,
+                            None => {
+                                println!(
                                 "[{addr:?}] Error when receiving Responder Encrypted Static. No session found"
                             );
-                            return;
-                        }
-                    };
-
-                    // Decrypt their static key
-                    if let Some(key) = &hss.mix_key {
-                        match key.decrypt(
-                            GenericArray::from_slice(&hss.nonce),
-                            their_enc_static.as_slice(),
-                        ) {
-                            Ok(dec_static_pk) => {
-                                // Convert the Vec<u8> into a reference to a fixed-size array
-                                let static_pk_bytes: [u8; 32] = {
-                                    // Ensure the Vec has the correct size
-                                    assert_eq!(dec_static_pk.len(), 32);
-
-                                    // Convert the Vec into a slice, and then use `as` to cast it to &[u8; 32]
-                                    dec_static_pk.as_slice().try_into().unwrap()
-                                };
-
-                                println!("[{addr:?}] DECRYPTED THEIR ENCRYPTED STATIC!!!!!!!!!!!!!!!!!!!");
-                                let their_static_pk = PublicKey::from(static_pk_bytes);
-                                hss.peer_static_key = Some(their_static_pk);
+                                return;
                             }
-                            Err(e) => {
-                                println!("[{addr:?}] Error decrypting static pk {e:?}");
+                        };
+
+                        // Decrypt their static key
+                        if let Some(key) = &hss.symmetric_key {
+                            match key.decrypt(
+                                GenericArray::from_slice(&hss.nonce),
+                                their_enc_static.as_slice(),
+                            ) {
+                                Ok(dec_static_pk) => {
+                                    // Convert the Vec<u8> into a reference to a fixed-size array
+                                    let static_pk_bytes: [u8; DH_KEY_SIZE] = {
+                                        // Ensure the Vec has the correct size
+                                        if dec_static_pk.len() != DH_KEY_SIZE {
+                                            error!("Received Static Key bytes does not match DH_KEY_SIZE");
+                                            return;
+                                        }
+
+                                        // Convert the Vec into a slice, and then use `try_into` to cast it to &[u8; 32]
+                                        if let Ok(static_key) = dec_static_pk.as_slice().try_into()
+                                        {
+                                            static_key
+                                        } else {
+                                            error!("Received Static Key bytes does not match DH_KEY_SIZE");
+                                            return;
+                                        }
+                                    };
+
+                                    println!("[{addr:?}] DECRYPTED THEIR ENCRYPTED STATIC!!!!!!!!!!!!!!!!!!!");
+                                    let their_static_pk = PublicKey::from(static_pk_bytes);
+                                    hss.peer_static_key = Some(their_static_pk);
+                                }
+                                Err(e) => {
+                                    println!("[{addr:?}] Error decrypting static pk {e:?}");
+                                }
                             }
                         }
+
+                        // Insert back into our ongoing handshake sessions
+                        let _ = hs_handler.ongoing.insert(peer, hss);
                     }
-
-                    // Insert back into our ongoing handshake sessions
-                    let _ = hs_handler.ongoing.insert(peer, hss);
                 }
-            },
+            }
             HandShakeMessage::GenerateStaticKeysFor(handshake_peer) => {
                 let mut hss = match hs_handler.ongoing.remove(&handshake_peer) {
                     Some(session) => session,
@@ -276,7 +288,7 @@ impl Node {
                 let our_static_pk = PublicKey::from(&our_static_sk);
                 let our_static_pk_bytes = our_static_pk.as_bytes().as_slice();
 
-                let encrpyted_static_pk = if let Some(key) = &hss.mix_key {
+                let encrpyted_static_pk = if let Some(key) = &hss.symmetric_key {
                     match key.encrypt(GenericArray::from_slice(&hss.nonce), our_static_pk_bytes) {
                         Ok(enc_static_pk) => enc_static_pk,
                         Err(e) => {
@@ -323,7 +335,7 @@ impl Node {
                 };
 
                 // Decrypt the message
-                let session_state = if let Some(key) = &hss.mix_key {
+                let session_state = if let Some(key) = &hss.symmetric_key {
                     match key.decrypt(GenericArray::from_slice(&hss.nonce), payload.as_slice()) {
                         Ok(notifier) => {
                             let deserialized_state: SessionState =
@@ -383,7 +395,7 @@ impl Node {
 
         match serialize(&notifier) {
             Ok(serailized_notifier) => {
-                let encrpyted_notifier = if let Some(key) = &hss.mix_key {
+                let encrpyted_notifier = if let Some(key) = &hss.symmetric_key {
                     match key.encrypt(
                         GenericArray::from_slice(&hss.nonce),
                         serailized_notifier.as_slice(),
@@ -406,7 +418,6 @@ impl Node {
                     ))),
                 ));
 
-                println!("[{addr:?}] Sending NOTIFIER to Sender");
                 if let Err(e) = event_tx
                     .send((self.our_address(), msg))
                     .await
