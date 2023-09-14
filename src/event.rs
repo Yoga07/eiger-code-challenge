@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use x25519_dalek::PublicKey;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Event {

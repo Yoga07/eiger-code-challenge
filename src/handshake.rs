@@ -1,17 +1,11 @@
 use crate::error::{Error, Result};
-use aes_gcm::aead::consts::U12;
 use aes_gcm::aead::generic_array::GenericArray;
-use aes_gcm::aead::{Aead, AeadCore, Nonce};
+use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit};
 use bincode::{deserialize, serialize};
-use bytes::Bytes;
-use sha3::digest::Output;
-use sha3::Sha3_256;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use tokio::sync::mpsc::Sender;
-use tokio::time::{sleep, Duration};
-use tracing::{error, info};
 use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
 
 use crate::event::{
@@ -34,6 +28,7 @@ pub struct HandShakeSession {
     peer_ephemeral_pk: Option<PublicKey>,
     peer_static_key: Option<PublicKey>,
     our_ephemeral_keypair: Option<(PublicKey, EphemeralSecret)>,
+    our_static_keys: Option<(PublicKey, StaticSecret)>,
     // Diffie-Hellman Keys
     ephemeral_shared_secret: Option<SharedSecret>,
     mix_key: Option<Aes256Gcm>,
@@ -49,7 +44,7 @@ impl HandShakeSession {
         // Start Diffie-Hellman of ephemeral keys
         let e_keypair = self.our_ephemeral_keypair.take();
 
-        if let Some((e_pub, e_sk)) = e_keypair {
+        if let Some((_e_pub, e_sk)) = e_keypair {
             let ephemeral_shared_secret = e_sk.diffie_hellman(&their_pk);
 
             // Split the shared secret into key and nonce
@@ -60,10 +55,10 @@ impl HandShakeSession {
                 match aes_gcm::Aes256Gcm::new_from_slice(ephemeral_shared_secret.as_bytes()) {
                     Ok(cipher) => cipher,
                     Err(e) => {
-                        println!("Error creating cipher from ephemeral_shared_secret");
-                        return Err(Error::HandShake(
-                            "Error creating cipher from ephemeral_shared_secret".to_string(),
-                        ));
+                        println!("Error creating cipher from ephemeral_shared_secret {e:?}");
+                        return Err(Error::HandShake(format!(
+                            "Error creating cipher from ephemeral_shared_secret {e:?}"
+                        )));
                     }
                 };
 
@@ -105,6 +100,7 @@ impl Node {
             peer_addr: node_addr,
             peer_ephemeral_pk: None,
             peer_static_key: None,
+            our_static_keys: None,
             our_ephemeral_keypair: Some((ephemeral_pk, ephemeral_sk)),
             ephemeral_shared_secret: None,
             nonce: INITIAL_NONCE.to_vec(),
@@ -126,7 +122,7 @@ impl Node {
         let msg = Event::LocalEvent(LocalEvent::SendEventTo(
             node_addr,
             Box::new(Event::Handshake(HandShakeMessage::Sender(
-                HandShakeSender::EphemeralPK(ephemeral_pk.as_bytes().clone()),
+                HandShakeSender::EphemeralPK(*ephemeral_pk.as_bytes()),
             ))),
         ));
 
@@ -155,6 +151,7 @@ impl Node {
                         peer_addr: peer,
                         peer_ephemeral_pk: Some(peer_e_pub),
                         peer_static_key: None,
+                        our_static_keys: None,
                         our_ephemeral_keypair: Some((our_ephemeral_pk, our_ephemeral_sk)),
                         ephemeral_shared_secret: None,
                         nonce: INITIAL_NONCE.to_vec(),
@@ -165,7 +162,7 @@ impl Node {
                     let msg = Event::LocalEvent(LocalEvent::SendEventTo(
                         peer,
                         Box::new(Event::Handshake(HandShakeMessage::Responder(
-                            HandShakeResponder::EphemeralPK(our_ephemeral_pk.as_bytes().clone()),
+                            HandShakeResponder::EphemeralPK(*our_ephemeral_pk.as_bytes()),
                         ))),
                     ));
 
@@ -234,19 +231,33 @@ impl Node {
                     };
 
                     // Decrypt their static key
-                    let decrypted_key = if let Some(key) = hss.mix_key {
+                    if let Some(key) = &hss.mix_key {
                         match key.decrypt(
                             GenericArray::from_slice(&hss.nonce),
                             their_enc_static.as_slice(),
                         ) {
-                            Ok(enc_static_pk) => {
+                            Ok(dec_static_pk) => {
+                                // Convert the Vec<u8> into a reference to a fixed-size array
+                                let static_pk_bytes: [u8; 32] = {
+                                    // Ensure the Vec has the correct size
+                                    assert_eq!(dec_static_pk.len(), 32);
+
+                                    // Convert the Vec into a slice, and then use `as` to cast it to &[u8; 32]
+                                    dec_static_pk.as_slice().try_into().unwrap()
+                                };
+
                                 println!("[{addr:?}] DECRYPTED THEIR ENCRYPTED STATIC!!!!!!!!!!!!!!!!!!!");
+                                let their_static_pk = PublicKey::from(static_pk_bytes);
+                                hss.peer_static_key = Some(their_static_pk);
                             }
                             Err(e) => {
                                 println!("[{addr:?}] Error decrypting static pk {e:?}");
                             }
                         }
-                    };
+                    }
+
+                    // Insert back into our ongoing handshake sessions
+                    let _ = hs_handler.ongoing.insert(peer, hss);
                 }
             },
             HandShakeMessage::GenerateStaticKeysFor(handshake_peer) => {
@@ -278,6 +289,8 @@ impl Node {
                     return;
                 };
 
+                hss.our_static_keys = Some((our_static_pk, our_static_sk));
+
                 println!("[{addr:?}] Sending enc_static_pk to Sender");
                 let msg_b = Event::LocalEvent(LocalEvent::SendEventTo(
                     peer,
@@ -294,9 +307,12 @@ impl Node {
                     println!("Error sending our e_pub to sender {e:?}");
                     return;
                 }
+
+                // Insert back into our ongoing handshake sessions
+                let _ = hs_handler.ongoing.insert(peer, hss);
             }
             HandShakeMessage::StateNotifier(payload) => {
-                let mut hss = match hs_handler.ongoing.get(&peer) {
+                let hss = match hs_handler.ongoing.get(&peer) {
                     Some(session) => session,
                     None => {
                         println!(
@@ -351,7 +367,6 @@ impl Node {
                     .map_err(|e| Error::Generic(format!("Event channel closed {e:?}")))
                 {
                     println!("Error sending HS notifier to sender {e:?}");
-                    return;
                 }
             }
         }
@@ -398,12 +413,10 @@ impl Node {
                     .map_err(|e| Error::Generic(format!("Event channel closed {e:?}")))
                 {
                     println!("Error sending HS notifier to sender {e:?}");
-                    return;
                 }
             }
             Err(e) => {
                 println!("Error serializing Notifier {e:?}");
-                return;
             }
         }
     }

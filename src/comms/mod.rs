@@ -26,6 +26,7 @@ pub(crate) const IDLE_TIMEOUT: usize = 60 * 60 * 1_000; // 3600s
 pub struct Comms {
     quinn_endpoint: quinn::Endpoint,
     incoming_conns: Arc<Mutex<IncomingConnections>>,
+    #[allow(clippy::type_complexity)]
     connection_pool: Arc<Mutex<BTreeMap<SocketAddr, (Connection, Receiver<IncomingMsg>)>>>,
 }
 

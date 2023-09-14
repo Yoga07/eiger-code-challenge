@@ -31,7 +31,7 @@ impl Node {
 
         let mut comms = Comms::new_node(addr, event_tx.clone())
             .await
-            .map_err(|e| Error::Comms(e))?;
+            .map_err(Error::Comms)?;
 
         info!("Started node at {}", comms.local_address()?);
 
@@ -56,7 +56,7 @@ impl Node {
     }
 
     pub fn our_address(&self) -> SocketAddr {
-        self.addr.clone()
+        self.addr
     }
 
     pub async fn connect_to(&mut self, addr: SocketAddr) {
@@ -98,7 +98,8 @@ impl Node {
         match event {
             LocalEvent::SendEventTo(peer, event) => self.send_event_to(peer, *event).await,
             LocalEvent::HandleHandshakeEvent((peer, hs_event)) => {
-                Ok(self.handle_handshake(peer, hs_event).await)
+                self.handle_handshake(peer, hs_event).await;
+                Ok(())
             }
         }
     }

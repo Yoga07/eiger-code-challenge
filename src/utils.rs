@@ -1,5 +1,3 @@
-use aes_gcm::aes::cipher::crypto_common::Output;
-use sha3::digest::FixedOutput;
 use sha3::{Digest, Sha3_256};
 
 pub type Hash = [u8; 32];
