@@ -12,12 +12,15 @@ pub enum Event {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LocalEvent {
     SendEventTo(SocketAddr, Box<Event>),
+    HandleHandshakeEvent((SocketAddr, HandShakeMessage)),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum HandShakeMessage {
     Sender(HandShakeSender),
     Responder(HandShakeResponder),
+    GenerateStaticKeysFor(SocketAddr),
+    StateNotifier(Vec<u8>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,5 +31,10 @@ pub enum HandShakeSender {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum HandShakeResponder {
     EphemeralPK([u8; 32]),
-    EncyptedStatic(),
+    EncyptedStatic(Vec<u8>),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum SessionState {
+    EphemeralDHEEDone,
 }

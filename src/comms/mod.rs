@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
-use tracing::trace;
+use tracing::{debug, error, trace};
 
 /// Channel bounds
 pub(crate) const CHANNEL_SIZE: usize = 10_000;
@@ -85,18 +85,17 @@ impl Comms {
     pub async fn listen_on_endpoint(&self) {
         let incoming_conns = self.incoming_conns.clone();
         let connection_pool = self.connection_pool.clone();
-        println!("Starting to listen!");
+        trace!("Starting to listen!");
         let _handle = tokio::spawn(async move {
-            println!("Awaiting message!");
             while let Some((connection, incoming_msg)) = incoming_conns.lock().await.next().await {
-                println!("New connection received!");
+                trace!("New connection received!");
 
                 // insert into connection pool
                 connection_pool
                     .lock()
                     .await
                     .insert(connection.remote_address(), (connection, incoming_msg));
-                println!("Inserted new conn!");
+                trace!("Inserted new conn!");
             }
         });
     }
@@ -110,11 +109,11 @@ impl Comms {
                         if let Ok(msg) = timeout(Duration::from_millis(1), receiver.recv()).await {
                             match msg {
                                 Some(msg) => {
-                                    println!("Recevied new msg on connection pool!");
+                                    debug!("Recevied new msg on connection pool!");
                                     msg
                                 }
                                 None => {
-                                    println!("Received error when reading message");
+                                    error!("Received error when reading message");
                                     continue;
                                 }
                             }
@@ -131,13 +130,13 @@ impl Comms {
                             continue;
                         }
                         Err(e) => {
-                            println!("Received error when opening message {e:?}");
+                            error!("Received error when opening message {e:?}");
                         }
                     }
                 }
 
                 // Polling interval
-                sleep(Duration::from_millis(1)).await;
+                sleep(Duration::from_millis(5)).await;
             }
         });
     }
@@ -146,10 +145,10 @@ impl Comms {
     ///
     /// It will always try to open a new connection.
     pub async fn new_connection(&mut self, node_addr: &SocketAddr) {
-        println!("Attempting to connect to {:?}", node_addr);
+        debug!("Attempting to connect to {:?}", node_addr);
         let connecting = match self.quinn_endpoint.connect(*node_addr, SERVER_NAME) {
             Err(error) => {
-                println!(
+                error!(
                     "Connection attempt to {node_addr:?} failed due to {:?}",
                     error
                 );
@@ -165,7 +164,7 @@ impl Comms {
                     Result<(CommsMessage, Option<SendStream>), CommsError>,
                 >(CHANNEL_SIZE);
                 listen_on_bi_streams(new_conn.clone(), peer_connection_tx);
-                println!("Successfully connected to peer {node_addr}, conn_id={conn_id}",);
+                debug!("Successfully connected to peer {node_addr}, conn_id={conn_id}",);
 
                 // Add this connection to the pool
                 self.connection_pool
@@ -174,7 +173,7 @@ impl Comms {
                     .insert(new_conn.remote_address(), (new_conn, peer_connection_rx));
             }
             Err(error) => {
-                println!("Error {error:?} when connecting to given address {node_addr:?}")
+                error!("Error {error:?} when connecting to given address {node_addr:?}")
             }
         }
     }
@@ -196,12 +195,10 @@ impl Comms {
     ///
     /// Messages sent over the stream will arrive at the peer in the order they were sent.
     pub async fn open_bi(&self, addr: SocketAddr) -> Result<(SendStream, RecvStream), CommsError> {
-        println!("Opening bi stream from connection pool");
         let conn_pool = self.connection_pool.lock().await;
-        println!("Awaiting lock on conn pool");
 
         let peer_connection = conn_pool.get(&addr).ok_or(CommsError::PeerNotFound)?;
-        println!("Opening bi stream");
+        debug!("Opening bi stream to {addr:?}");
         let (send_stream, recv_stream) = peer_connection
             .0
             .open_bi()
@@ -252,8 +249,11 @@ pub fn listen_on_bi_streams(connection: Connection, tx: Sender<IncomingMsg>) {
                 let msg = msg.map(|msg| (msg, Some(send)));
                 // Send away the msg or error
                 reserved_sender.send(msg);
-                println!("Upper layer notified of new messages");
+                trace!("Upper layer notified of new messages");
             });
+
+            // Polling interval
+            sleep(Duration::from_millis(5)).await;
         }
 
         trace!("Connection {conn_id}: stopped listening for bi-streams");

@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
-use tracing::trace;
+use tracing::{info, trace};
 // use tracing::error;
 
 #[derive(Clone)]
@@ -33,7 +33,7 @@ impl Node {
             .await
             .map_err(|e| Error::Comms(e))?;
 
-        println!("Started node at {}", comms.local_address()?);
+        info!("Started node at {}", comms.local_address()?);
 
         let addr = comms.local_address()?;
         let hs_handler = HandshakeHandler::new();
@@ -64,14 +64,14 @@ impl Node {
     }
 
     pub async fn send_event_to(&self, addr: SocketAddr, msg: Event) -> Result<()> {
-        println!("Trying to send a message to {addr:?}");
+        info!("Trying to send a message to {addr:?}");
         let serialized = serialize(&msg)?;
         self.comms
             .read()
             .await
             .send_message_to(addr, Bytes::from(serialized))
             .await?;
-        println!("Sent a message to {addr:?}");
+        info!("Sent a message to {addr:?}");
         Ok(())
     }
 
@@ -83,10 +83,7 @@ impl Node {
                 trace!("Received {event:?} from {peer:?}");
                 match event {
                     Event::Generic(message) => println!("Received string message {message:?}"),
-                    Event::Handshake(message) => {
-                        node.handle_handshake(peer, message, node.event_tx.clone())
-                            .await
-                    }
+                    Event::Handshake(message) => node.handle_handshake(peer, message).await,
                     Event::LocalEvent(local_msg) => {
                         if let Err(e) = node.handle_local_event(local_msg).await {
                             println!("Error handling local event {e:?}");
@@ -100,6 +97,9 @@ impl Node {
     pub async fn handle_local_event(&self, event: LocalEvent) -> Result<()> {
         match event {
             LocalEvent::SendEventTo(peer, event) => self.send_event_to(peer, *event).await,
+            LocalEvent::HandleHandshakeEvent((peer, hs_event)) => {
+                Ok(self.handle_handshake(peer, hs_event).await)
+            }
         }
     }
 }

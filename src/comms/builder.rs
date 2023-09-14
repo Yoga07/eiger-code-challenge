@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tracing::{debug, error, info};
 // use tracing::{trace, warn};
 
 pub(crate) const DEFAULT_IDLE_TIMEOUT: u32 = 10_000; // 10s
@@ -185,23 +186,23 @@ fn listen_for_incoming_connections(
                                 CHANNEL_SIZE,
                             );
                         listen_on_bi_streams(connection.clone(), peer_connection_tx);
-                        println!("Incoming new connection conn_id={conn_id}");
+                        debug!("Incoming new connection conn_id={conn_id}");
                         if conn_sender
                             .send((connection, peer_connection_rx))
                             .await
                             .is_err()
                         {
-                            println!("Dropping incoming connection conn_id={conn_id}, because receiver was dropped");
+                            error!("Dropping incoming connection conn_id={conn_id}, because receiver was dropped");
                         }
                     }
                     Err(err) => {
-                        println!("An incoming connection failed because of: {:?}", err);
+                        error!("An incoming connection failed because of: {:?}", err);
                     }
                 }
             });
         }
 
-        println!(
+        info!(
             "quinn::Endpoint::accept() returned None. There will be no more incoming connections"
         );
     });

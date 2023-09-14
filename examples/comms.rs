@@ -12,11 +12,13 @@ async fn main() {
 
     let _handle = tokio::spawn(async move {
         let _node = match Node::new(address1, vec![address2]).await {
-            Ok(node) => loop {
+            Ok(node) => {
                 node.start_event_loop().await;
-                node.begin_handshake(address2).await.unwrap();
+
+                // Wait for the other node to set up
                 sleep(Duration::from_secs(1)).await;
-            },
+                node.begin_handshake(address2).await.unwrap();
+            }
             Err(e) => {
                 println!("Error starting node {e:?}");
                 return;
