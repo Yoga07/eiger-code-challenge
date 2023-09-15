@@ -1,4 +1,6 @@
+use openssl::error::ErrorStack;
 use rustls::CertificateError;
+use std::io;
 
 #[derive(Debug)]
 pub enum CommsError {
@@ -16,4 +18,36 @@ pub enum CommsError {
     BadCertificate(String),
     Connection(String),
     Io(String),
+    Tls(TLSError),
+    ListenerCreation(io::Error),
+    ListenerSetNonBlocking,
+    ListenerConversion,
 }
+
+pub enum TLSError {
+    TcpConnection,
+    TcpNoDelay,
+    CouldNotGenerateTLSPK,
+    CouldNotGenerateTlsCertificate(ErrorStack),
+    CouldNotExtractEcKey,
+    TlsInitialization(String),
+    NoPeerCertificate,
+    PeerCertificateInvalid,
+    WrongSignatureAlgorithm,
+    CorruptSubjectOrIssuer,
+    NotSelfSigned,
+    WrongSerialNumber,
+    TimeIssue,
+    NotYetValid,
+    Expired,
+    CannotReadPublicKey,
+    KeyFailsCheck,
+    WrongCurve,
+    FailedToValidateSignature,
+    InvalidSignature,
+}
+
+/// OpenSSL result type alias.
+///
+/// Many functions rely solely on `openssl` functions and return this kind of result.
+pub type SslResult<T> = Result<T, ErrorStack>;

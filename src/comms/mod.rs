@@ -1,21 +1,31 @@
 mod builder;
 mod error;
 mod message;
+mod tls_utils;
 
 pub use error::CommsError;
 use std::collections::btree_map::BTreeMap;
 
 use crate::comms::builder::{Builder, SERVER_NAME};
+use crate::comms::error::{SslResult, TLSError};
 use crate::comms::message::CommsMessage;
+use crate::comms::tls_utils::{
+    generate_node_cert, validate_self_signed_cert, with_generated_certs, Identity,
+};
 use crate::event::Event;
 use bincode::deserialize;
 use bytes::Bytes;
+use openssl::pkey::{PKeyRef, Private};
+use openssl::ssl::{SslConnector, SslMethod};
+use openssl::x509::X509Ref;
 use quinn::{Connection, RecvStream, SendStream};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
+use tokio_openssl::SslStream;
 use tracing::{debug, error, trace};
 
 /// Channel bounds
@@ -28,6 +38,8 @@ pub struct Comms {
     incoming_conns: Arc<Mutex<IncomingConnections>>,
     #[allow(clippy::type_complexity)]
     connection_pool: Arc<Mutex<BTreeMap<SocketAddr, (Connection, Receiver<IncomingMsg>)>>>,
+    tcp_ep: TcpListener,
+    identity: Identity,
 }
 
 type IncomingMsg = Result<(CommsMessage, Option<SendStream>), CommsError>;
@@ -62,12 +74,27 @@ impl Comms {
             .idle_timeout(IDLE_TIMEOUT as u32)
             .server()?;
 
+        let listener =
+            TcpListener::bind(bind_address).map_err(|error| CommsError::ListenerCreation(error))?;
+
+        // We must set non-blocking to `true` or else the tokio task hangs forever.
+        listener
+            .set_nonblocking(true)
+            .map_err(CommsError::ListenerSetNonBlocking)?;
+
+        let tcp_ep =
+            tokio::net::TcpListener::from_std(listener).map_err(CommsError::ListenerConversion)?;
+
         let incoming_arced = Arc::new(Mutex::new(incoming_connections));
+
+        let new_identity = with_generated_certs()?;
 
         let comms = Comms {
             quinn_endpoint: endpoint,
             incoming_conns: incoming_arced,
             connection_pool: Arc::new(Mutex::new(BTreeMap::new())),
+            tcp_ep,
+            identity: new_identity,
         };
 
         comms.listen_on_endpoint().await;
@@ -75,6 +102,48 @@ impl Comms {
         comms.listen_to_connection_pool(event_tx).await;
 
         Ok(comms)
+    }
+
+    pub(crate) async fn connect_to(addr: SocketAddr) -> Result<(), CommsError> {
+        let stream = TcpStream::connect(peer_addr)
+            .await
+            .map_err(TLSError::TcpConnection)?;
+
+        stream.set_nodelay(true).map_err(TLSError::TcpNoDelay)?;
+
+        let mut transport =
+            Self::create_tls_connector(context.our_cert.as_x509(), &context.secret_key)
+                .and_then(|connector| connector.configure())
+                .and_then(|mut config| {
+                    config.set_verify_hostname(false);
+                    config.into_ssl("this-will-not-be-checked.example.com")
+                })
+                .and_then(|ssl| SslStream::new(ssl, stream))
+                .map_err(TLSError::TlsInitialization)?;
+
+        let peer_cert = transport
+            .ssl()
+            .peer_certificate()
+            .ok_or(TLSError::NoPeerCertificate)?;
+
+        // We'll validate them just as Casper does to maintain integrity
+        let validated_peer_cert =
+            validate_self_signed_cert(peer_cert).map_err(TLSError::PeerCertificateInvalid)?;
+
+        Ok(())
+    }
+    /// Creates a TLS acceptor for a client.
+    ///
+    /// A connector compatible with the acceptor created using `create_tls_acceptor`. Server
+    /// certificates must always be validated using `validate_cert` after connecting.
+    pub(crate) fn create_tls_connector(
+        cert: &X509Ref,
+        private_key: &PKeyRef<Private>,
+    ) -> SslResult<SslConnector> {
+        let mut builder = SslConnector::builder(SslMethod::tls_client())?;
+        set_context_options(&mut builder, cert, private_key)?;
+
+        Ok(builder.build())
     }
 
     pub fn local_address(&self) -> Result<SocketAddr, CommsError> {

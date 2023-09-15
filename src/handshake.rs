@@ -13,7 +13,7 @@ use crate::event::{
     Event, HandShakeMessage, HandShakeResponder, HandShakeSender, LocalEvent, SessionState,
 };
 use crate::node::Node;
-use crate::utils::{hash, Hash, serialize_and_encrypt};
+use crate::utils::{hash, serialize_and_encrypt, Hash};
 
 /// Name of the handshake pattern we use
 pub const HANDHSHAKE_PATTERN: &str = "NOISE_XX_SHA256";
@@ -323,7 +323,9 @@ impl Node {
                     // Handshake complete, send random data enc with new keys
                     let random_data = b"Hi there!".to_vec();
                     if let Some(cipher) = &hss.symmetric_key {
-                        if let Some(payload) = serialize_and_encrypt(random_data, cipher, &hss.nonce)  {
+                        if let Some(payload) =
+                            serialize_and_encrypt(random_data, cipher, &hss.nonce)
+                        {
                             let msg_c = Event::LocalEvent(LocalEvent::SendEventTo(
                                 peer,
                                 Box::new(Event::Handshake(HandShakeMessage::Complete(payload))),
@@ -339,7 +341,9 @@ impl Node {
                             }
                         }
                     } else {
-                        println!("Error sending Handshake Complete to sender. No symmetric key found");
+                        println!(
+                            "Error sending Handshake Complete to sender. No symmetric key found"
+                        );
                         return;
                     }
                 } else {
@@ -440,7 +444,8 @@ impl Node {
 
                 // Decrypt the message
                 if let Some(key) = &hss.symmetric_key {
-                    match key.decrypt(GenericArray::from_slice(&hss.nonce), enc_payload.as_slice()) {
+                    match key.decrypt(GenericArray::from_slice(&hss.nonce), enc_payload.as_slice())
+                    {
                         Ok(dec_data) => {
                             let deserialized_payload: Vec<u8> =
                                 if let Ok(deser_payload) = deserialize(&dec_data) {
