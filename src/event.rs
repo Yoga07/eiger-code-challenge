@@ -18,8 +18,9 @@ pub enum LocalEvent {
 pub enum HandShakeMessage {
     Sender(HandShakeSender),
     Responder(HandShakeResponder),
-    GenerateStaticKeysFor(SocketAddr),
+    GenerateStaticKeysFor(SocketAddr, bool),
     StateNotifier(Vec<u8>),
+    Complete(Vec<u8>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,5 +36,6 @@ pub enum HandShakeResponder {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum SessionState {
-    EphemeralDHEEDone,
+    CompletedEphemeralDH,
+    StartingFinalDH,
 }

@@ -13,7 +13,7 @@ use crate::event::{
     Event, HandShakeMessage, HandShakeResponder, HandShakeSender, LocalEvent, SessionState,
 };
 use crate::node::Node;
-use crate::utils::{hash, Hash};
+use crate::utils::{hash, Hash, serialize_and_encrypt};
 
 /// Name of the handshake pattern we use
 pub const HANDHSHAKE_PATTERN: &str = "NOISE_XX_SHA256";
@@ -36,6 +36,7 @@ pub struct HandShakeSession {
     our_static_keys: Option<(PublicKey, StaticSecret)>,
     // Diffie-Hellman Keys
     ephemeral_shared_secret: Option<SharedSecret>,
+    final_shared_secret: Option<SharedSecret>,
     symmetric_key: Option<Aes256Gcm>,
     nonce: Vec<u8>,
     // Session specifics
@@ -80,6 +81,30 @@ impl HandShakeSession {
 
         Ok(())
     }
+
+    pub fn perform_final_diffie_hellman(&mut self) -> bool {
+        if let Some(sender_ephemeral_pk) = self.peer_ephemeral_pk {
+            if let Some((our_static_pk, our_static_sk)) = self.our_static_keys.as_mut() {
+                let final_shared_secret = our_static_sk.diffie_hellman(&sender_ephemeral_pk);
+
+                // Update the cipher keys
+                let cipher =
+                    match aes_gcm::Aes256Gcm::new_from_slice(final_shared_secret.as_bytes()) {
+                        Ok(cipher) => cipher,
+                        Err(e) => {
+                            println!("Error creating cipher from ephemeral_shared_secret {e:?}");
+                            return false;
+                        }
+                    };
+
+                self.final_shared_secret = Some(final_shared_secret);
+                self.symmetric_key = Some(cipher);
+            }
+            true
+        } else {
+            return false;
+        }
+    }
 }
 
 impl HandshakeHandler {
@@ -108,6 +133,7 @@ impl Node {
             our_static_keys: None,
             our_ephemeral_keypair: Some((ephemeral_pk, ephemeral_sk)),
             ephemeral_shared_secret: None,
+            final_shared_secret: None,
             nonce: INITIAL_NONCE.to_vec(),
             symmetric_key: None,
             session_hash: hash(HANDHSHAKE_PATTERN.as_bytes()),
@@ -159,6 +185,7 @@ impl Node {
                         our_static_keys: None,
                         our_ephemeral_keypair: Some((our_ephemeral_pk, our_ephemeral_sk)),
                         ephemeral_shared_secret: None,
+                        final_shared_secret: None,
                         nonce: INITIAL_NONCE.to_vec(),
                         symmetric_key: None,
                         session_hash: hash(HANDHSHAKE_PATTERN.as_bytes()),
@@ -212,7 +239,7 @@ impl Node {
                             return;
                         }
 
-                        let notifier = SessionState::EphemeralDHEEDone;
+                        let notifier = SessionState::CompletedEphemeralDH;
                         self.send_hs_notifier(&hss, event_tx.clone(), peer, notifier)
                             .await;
 
@@ -257,7 +284,6 @@ impl Node {
                                         }
                                     };
 
-                                    println!("[{addr:?}] DECRYPTED THEIR ENCRYPTED STATIC!!!!!!!!!!!!!!!!!!!");
                                     let their_static_pk = PublicKey::from(static_pk_bytes);
                                     hss.peer_static_key = Some(their_static_pk);
                                 }
@@ -272,7 +298,7 @@ impl Node {
                     }
                 }
             }
-            HandShakeMessage::GenerateStaticKeysFor(handshake_peer) => {
+            HandShakeMessage::GenerateStaticKeysFor(handshake_peer, is_initiator) => {
                 let mut hss = match hs_handler.ongoing.remove(&handshake_peer) {
                     Some(session) => session,
                     None => {
@@ -288,36 +314,78 @@ impl Node {
                 let our_static_pk = PublicKey::from(&our_static_sk);
                 let our_static_pk_bytes = our_static_pk.as_bytes().as_slice();
 
-                let encrpyted_static_pk = if let Some(key) = &hss.symmetric_key {
-                    match key.encrypt(GenericArray::from_slice(&hss.nonce), our_static_pk_bytes) {
-                        Ok(enc_static_pk) => enc_static_pk,
-                        Err(e) => {
-                            println!("Error encrypting static pk {e:?}");
-                            return;
+                if is_initiator {
+                    hss.our_static_keys = Some((our_static_pk, our_static_sk));
+
+                    // Run DH(responder_e_pub, sender_static_key)
+                    hss.perform_final_diffie_hellman();
+
+                    // Handshake complete, send random data enc with new keys
+                    let random_data = b"Hi there!".to_vec();
+                    if let Some(cipher) = &hss.symmetric_key {
+                        if let Some(payload) = serialize_and_encrypt(random_data, cipher, &hss.nonce)  {
+                            let msg_c = Event::LocalEvent(LocalEvent::SendEventTo(
+                                peer,
+                                Box::new(Event::Handshake(HandShakeMessage::Complete(payload))),
+                            ));
+
+                            if let Err(e) = event_tx
+                                .send((self.our_address(), msg_c))
+                                .await
+                                .map_err(|e| Error::Generic(format!("Event channel closed {e:?}")))
+                            {
+                                println!("Error sending Handshake Complete to sender {e:?}");
+                                return;
+                            }
                         }
+                    } else {
+                        println!("Error sending Handshake Complete to sender. No symmetric key found");
+                        return;
                     }
                 } else {
-                    println!("No mixKey found. Need a mixKey for Encrypting Static key");
-                    return;
-                };
+                    let encrpyted_static_pk = if let Some(key) = &hss.symmetric_key {
+                        match key.encrypt(GenericArray::from_slice(&hss.nonce), our_static_pk_bytes)
+                        {
+                            Ok(enc_static_pk) => enc_static_pk,
+                            Err(e) => {
+                                println!("Error encrypting static pk {e:?}");
+                                return;
+                            }
+                        }
+                    } else {
+                        println!("No symmetric found. Need a symmetric for Encrypting Static key");
+                        return;
+                    };
 
-                hss.our_static_keys = Some((our_static_pk, our_static_sk));
+                    hss.our_static_keys = Some((our_static_pk, our_static_sk));
 
-                println!("[{addr:?}] Sending enc_static_pk to Sender");
-                let msg_b = Event::LocalEvent(LocalEvent::SendEventTo(
-                    peer,
-                    Box::new(Event::Handshake(HandShakeMessage::Responder(
-                        HandShakeResponder::EncyptedStatic(encrpyted_static_pk),
-                    ))),
-                ));
+                    println!("[{addr:?}] Sending enc_static_pk to Sender");
+                    let msg_b = Event::LocalEvent(LocalEvent::SendEventTo(
+                        peer,
+                        Box::new(Event::Handshake(HandShakeMessage::Responder(
+                            HandShakeResponder::EncyptedStatic(encrpyted_static_pk),
+                        ))),
+                    ));
 
-                if let Err(e) = event_tx
-                    .send((self.our_address(), msg_b))
-                    .await
-                    .map_err(|e| Error::Generic(format!("Event channel closed {e:?}")))
-                {
-                    println!("Error sending our e_pub to sender {e:?}");
-                    return;
+                    if let Err(e) = event_tx
+                        .send((self.our_address(), msg_b))
+                        .await
+                        .map_err(|e| Error::Generic(format!("Event channel closed {e:?}")))
+                    {
+                        println!("Error sending our e_pub to sender {e:?}");
+                        return;
+                    }
+
+                    self.send_hs_notifier(
+                        &hss,
+                        self.event_tx.clone(),
+                        peer,
+                        SessionState::StartingFinalDH,
+                    )
+                    .await;
+
+                    // Run DH(sender_e_pub, responder_static_key)
+                    hss.perform_final_diffie_hellman();
                 }
 
                 // Insert back into our ongoing handshake sessions
@@ -353,11 +421,45 @@ impl Node {
                         }
                     }
                 } else {
-                    println!("[{addr:?}] Error: mixKey missing during state msg decryption");
+                    println!("[{addr:?}] Error: symmetric missing during state msg decryption");
                     return;
                 };
 
                 self.handle_session_state(peer, session_state).await;
+            }
+            HandShakeMessage::Complete(enc_payload) => {
+                let hss = match hs_handler.ongoing.get(&peer) {
+                    Some(session) => session,
+                    None => {
+                        println!(
+                            "[{addr:?}] Error when receiving Responder Encrypted Static. No session found"
+                        );
+                        return;
+                    }
+                };
+
+                // Decrypt the message
+                if let Some(key) = &hss.symmetric_key {
+                    match key.decrypt(GenericArray::from_slice(&hss.nonce), enc_payload.as_slice()) {
+                        Ok(dec_data) => {
+                            let deserialized_payload: Vec<u8> =
+                                if let Ok(deser_payload) = deserialize(&dec_data) {
+                                    deser_payload
+                                } else {
+                                    return;
+                                };
+                            let string = String::from_utf8(deserialized_payload).unwrap();
+                            println!("[{addr:?}] DECRYPTED PAYLOAD! {string:?}");
+                        }
+                        Err(e) => {
+                            println!("[{addr:?}] Error decrypting Notifier {e:?}");
+                            return;
+                        }
+                    }
+                } else {
+                    println!("[{addr:?}] Error: symmetric missing during state msg decryption");
+                    return;
+                }
             }
         }
     }
@@ -365,13 +467,29 @@ impl Node {
     pub async fn handle_session_state(&self, peer: SocketAddr, session_state: SessionState) {
         let addr = self.our_address();
         match session_state {
-            SessionState::EphemeralDHEEDone => {
+            SessionState::CompletedEphemeralDH => {
                 let msg = Event::LocalEvent(LocalEvent::HandleHandshakeEvent((
                     peer,
-                    HandShakeMessage::GenerateStaticKeysFor(peer),
+                    // is_initiator = false;
+                    HandShakeMessage::GenerateStaticKeysFor(peer, false),
                 )));
 
-                println!("[{addr:?}] Sending NOTIFIER to Sender");
+                if let Err(e) = self
+                    .event_tx
+                    .send((self.our_address(), msg))
+                    .await
+                    .map_err(|e| Error::Generic(format!("Event channel closed {e:?}")))
+                {
+                    println!("Error sending HS notifier to sender {e:?}");
+                }
+            }
+            SessionState::StartingFinalDH => {
+                let msg = Event::LocalEvent(LocalEvent::HandleHandshakeEvent((
+                    peer,
+                    // is_initiator = true;
+                    HandShakeMessage::GenerateStaticKeysFor(peer, true),
+                )));
+
                 if let Err(e) = self
                     .event_tx
                     .send((self.our_address(), msg))
@@ -407,7 +525,7 @@ impl Node {
                         }
                     }
                 } else {
-                    println!("No mixKey found. Need a mixKey for Encrypting Notifier");
+                    println!("No symmetric found. Need a symmetric for Encrypting Notifier");
                     return;
                 };
 
