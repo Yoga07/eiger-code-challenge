@@ -26,7 +26,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_openssl::SslStream;
-use tracing::{debug, error, trace};
+use tracing::{debug, error, info, trace};
 
 /// Channel bounds
 pub(crate) const CHANNEL_SIZE: usize = 10_000;
@@ -37,9 +37,10 @@ pub struct Comms {
     quinn_endpoint: quinn::Endpoint,
     incoming_conns: Arc<Mutex<IncomingConnections>>,
     #[allow(clippy::type_complexity)]
-    connection_pool: Arc<Mutex<BTreeMap<SocketAddr, (Connection, Receiver<IncomingMsg>)>>>,
+    // connection_pool: Arc<Mutex<BTreeMap<SocketAddr, (Connection, Receiver<IncomingMsg>)>>>,
     tcp_ep: TcpListener,
     identity: Identity,
+    connection_pool: Arc<Mutex<BTreeMap<SocketAddr, SslStream<TcpStream>>>>,
 }
 
 type IncomingMsg = Result<(CommsMessage, Option<SendStream>), CommsError>;
@@ -104,7 +105,7 @@ impl Comms {
         Ok(comms)
     }
 
-    pub(crate) async fn connect_to(addr: SocketAddr) -> Result<(), CommsError> {
+    pub async fn connect_to(&self, peer_addr: SocketAddr) -> Result<(), CommsError> {
         let stream = TcpStream::connect(peer_addr)
             .await
             .map_err(TLSError::TcpConnection)?;
@@ -127,9 +128,13 @@ impl Comms {
             .ok_or(TLSError::NoPeerCertificate)?;
 
         // We'll validate them just as Casper does to maintain integrity
-        let validated_peer_cert =
+        let _validated_peer_cert =
             validate_self_signed_cert(peer_cert).map_err(TLSError::PeerCertificateInvalid)?;
 
+        info!("Validated Peer Cert");
+
+
+        self.connection_pool.lock().await.insert(peer_addr, transport);
         Ok(())
     }
     /// Creates a TLS acceptor for a client.
@@ -174,9 +179,9 @@ impl Comms {
         let all_receivers = self.connection_pool.clone();
         let _handle = tokio::spawn(async move {
             loop {
-                for (connection, ref mut receiver) in all_receivers.lock().await.values_mut() {
+                for stream in all_receivers.lock().await.values_mut() {
                     let msg =
-                        if let Ok(msg) = timeout(Duration::from_millis(1), receiver.recv()).await {
+                        if let Ok(msg) = timeout(Duration::from_millis(1), stream.).await {
                             match msg {
                                 Some(msg) => {
                                     debug!("Recevied new msg on connection pool!");

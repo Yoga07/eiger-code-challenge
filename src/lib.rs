@@ -3,7 +3,7 @@
 mod comms;
 pub mod error;
 mod event;
-mod handshake;
+// mod handshake;
 pub mod node;
 pub mod utils;
 

@@ -15,9 +15,8 @@ use tracing::{info, trace};
 #[derive(Clone)]
 pub struct Node {
     addr: SocketAddr,
-    static_key: (PublicKey, SecretKey),
     bootstrap_nodes: Vec<SocketAddr>,
-    pub(crate) handshake_handler: Arc<RwLock<HandshakeHandler>>,
+    // pub(crate) handshake_handler: Arc<RwLock<HandshakeHandler>>,
     comms: Arc<RwLock<Comms>>,
     pub(crate) event_tx: Sender<(SocketAddr, Event)>,
     event_rx: Arc<RwLock<Receiver<(SocketAddr, Event)>>>,
@@ -36,17 +35,17 @@ impl Node {
         info!("Started node at {}", comms.local_address()?);
 
         let addr = comms.local_address()?;
-        let hs_handler = HandshakeHandler::new();
 
-        for node_addr in &bootstrap_nodes {
-            comms.new_connection(node_addr).await;
-        }
+        comms.con
+
+        // for node_addr in &bootstrap_nodes {
+        //     comms.new_connection(node_addr).await;
+        // }
 
         let node = Node {
             addr,
-            static_key: (pk, sk),
             bootstrap_nodes,
-            handshake_handler: Arc::new(RwLock::new(hs_handler)),
+            // handshake_handler: Arc::new(RwLock::new(hs_handler)),
             comms: Arc::new(RwLock::new(comms)),
             event_tx,
             event_rx: Arc::new(RwLock::new(event_rx)),
