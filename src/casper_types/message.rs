@@ -1,15 +1,17 @@
+use std::fmt::{Debug, Display, Formatter};
 use crate::casper_types::crypto::ConsensusCertificate;
 use crate::casper_types::Nonce;
 use casper_hashing::Digest;
 use casper_types::ProtocolVersion;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use serde::de::DeserializeOwned;
 use strum::EnumDiscriminants;
 
 #[derive(Clone, Debug, Deserialize, Serialize, EnumDiscriminants)]
 #[strum_discriminants(derive(strum::EnumIter))]
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum Message<P> {
+pub enum Message<P> {
     Handshake {
         /// Network we are connected to.
         network_name: String,
@@ -46,3 +48,13 @@ pub(crate) enum Message<P> {
 fn default_protocol_version() -> ProtocolVersion {
     ProtocolVersion::V1_0_0
 }
+
+/// Network message payload.
+///
+/// Payloads are what is transferred across the network outside of control messages from the
+/// networking component itself.
+pub trait Payload:
+Serialize + DeserializeOwned + Clone + Debug + Send + Sync + 'static
+{}
+
+impl<P: Payload> Message<P> {}

@@ -60,9 +60,8 @@ impl CommsMessage {
         let header_bytes = header.to_bytes();
 
         let mut all_bytes =
-            BytesMut::with_capacity(header_bytes.len() + header.payload_len() as usize);
+            BytesMut::with_capacity(header.payload_len() as usize);
 
-        all_bytes.extend_from_slice(&header_bytes);
         all_bytes.extend_from_slice(payload);
 
         // Send bytes of TcpStream

@@ -1,29 +1,34 @@
-use crate::casper_types::message::Message;
+use crate::casper_types::message::{Message, Payload};
 use crate::comms::{Comms, CHANNEL_SIZE};
 use crate::error::{Error, Result};
 use bincode::serialize;
 use bytes::Bytes;
-use std::fmt::Debug;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use casper_types::{ProtocolVersion, SemVer};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio_serde::Serializer;
 use tracing::info;
+use crate::casper_types::ser_deser::MessagePackFormat;
 // use tracing::error;
 
 #[derive(Clone)]
-pub struct Node<P> {
+pub struct Node {
     addr: SocketAddr,
     bootstrap_nodes: Vec<SocketAddr>,
     // pub(crate) handshake_handler: Arc<RwLock<HandshakeHandler>>,
     comms: Arc<RwLock<Comms>>,
-    pub(crate) event_tx: Sender<(SocketAddr, Message<P>)>,
-    event_rx: Arc<RwLock<Receiver<(SocketAddr, Message<P>)>>>,
+    pub(crate) event_tx: Sender<(SocketAddr, Message<Vec<u8>>)>,
+    event_rx: Arc<RwLock<Receiver<(SocketAddr, Message<Vec<u8>>)>>>,
 }
 
-impl<P: Debug> Node<P> {
+impl Payload for Vec<u8> {}
+
+impl Node {
     pub async fn new(our_addr: SocketAddr, bootstrap_nodes: Vec<SocketAddr>) -> Result<Self> {
-        let (event_tx, event_rx) = channel::<(SocketAddr, Message<P>)>(CHANNEL_SIZE);
+        let (event_tx, event_rx) = channel(CHANNEL_SIZE);
 
         let comms = Comms::new_node(our_addr, event_tx.clone())
             .await
@@ -60,13 +65,26 @@ impl<P: Debug> Node<P> {
             .map_err(Error::Comms)
     }
 
-    pub async fn send_message_to(&self, addr: SocketAddr, msg: Message<P>) -> Result<()> {
+    pub async fn send_handshake_to<P: Payload>(&self, addr: SocketAddr) -> Result<()> {
+
+        let mut encoder = MessagePackFormat;
+        let hs: Message<P> = Message::Handshake {
+            network_name: "casper-example".to_string(),
+            public_addr: self.addr,
+            protocol_version: ProtocolVersion::V1_0_0,
+            consensus_certificate: None,
+            is_syncing: false,
+            chainspec_hash: None,
+        };
+        let serialized_handshake_message = Pin::new(&mut encoder)
+            .serialize(&Arc::new(hs))
+            .map_err(|_|Error::HandShake("Could Not Encode Our Handshake".to_string()))?;
+
         info!("Trying to send a message to {addr:?}");
-        let serialized = serialize(&msg)?;
         self.comms
             .write()
             .await
-            .send_message_to(addr, Bytes::from(serialized))
+            .send_message_to(addr, serialized_handshake_message)
             .await?;
         info!("Sent a message to {addr:?}");
         Ok(())

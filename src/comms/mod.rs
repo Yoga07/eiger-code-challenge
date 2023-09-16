@@ -5,13 +5,13 @@ mod tls_utils;
 pub use error::CommsError;
 use std::collections::btree_map::BTreeMap;
 
-use crate::casper_types::message::Message;
+use crate::casper_types::message::{Message, Payload};
 use crate::comms::error::{SslResult, TLSError};
 use crate::comms::message::CommsMessage;
 use crate::comms::tls_utils::{
     set_context_options, validate_self_signed_cert, with_generated_certs, Identity,
 };
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use openssl::pkey::{PKeyRef, Private};
 use openssl::ssl::{Ssl, SslAcceptor, SslConnector, SslMethod};
 use openssl::x509::X509Ref;
@@ -24,7 +24,9 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_openssl::SslStream;
+use tokio_serde::Deserializer;
 use tracing::{error, info, trace};
+use crate::casper_types::ser_deser::MessagePackFormat;
 
 /// Channel bounds
 pub(crate) const CHANNEL_SIZE: usize = 10_000;
@@ -39,7 +41,7 @@ pub struct Comms {
 }
 
 impl Comms {
-    pub async fn new_node<P>(
+    pub async fn new_node<P: Payload>(
         addr: SocketAddr,
         event_tx: Sender<(SocketAddr, Message<P>)>,
     ) -> Result<Self, CommsError> {
@@ -210,7 +212,7 @@ impl Comms {
         });
     }
 
-    pub async fn listen_to_connection_pool<P>(&self, _event_tx: Sender<(SocketAddr, Message<P>)>) {
+    pub async fn listen_to_connection_pool<P: Payload>(&self, _event_tx: Sender<(SocketAddr, Message<P>)>) {
         println!("Starting conn pool listener thread");
         let all_receivers = self.connection_pool.clone();
         let _handle = tokio::spawn(async move {
@@ -235,7 +237,22 @@ impl Comms {
 
                                 // Handle the data received from the client
                                 let data = &buffer[..bytes_read];
-                                println!("Received DATA FROM CASPER!: {:?}", data);
+
+                                println!("Data from Casper {data:?}");
+
+                                let mut encoder = MessagePackFormat;
+
+                                let remote_message: Message<P> = match Pin::new(&mut encoder)
+                                    .deserialize(&BytesMut::from(data))
+                                    .map_err(|e|CommsError::InvalidRemoteHandshakeMessage(e.to_string())) {
+                                    Ok(x) => {x},
+                                    Err(e) => {
+                                        println!("Error deserializing DATA FROM CASPER!: {e:?}");
+                                        continue
+                                    }
+                                };
+
+                                println!("Received DATA FROM CASPER!: {:?}", remote_message);
                             }
                             Err(e) => {
                                 println!("Error reading from client: {:?}", e);
