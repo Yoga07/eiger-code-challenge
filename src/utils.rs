@@ -7,7 +7,7 @@ use openssl::hash::{DigestBytes, MessageDigest};
 use openssl::nid::Nid;
 use openssl::sha;
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Sha3_256};
+use sha3::Sha3_256;
 use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
@@ -54,6 +54,12 @@ use std::fmt::{Debug, Display, Formatter};
 //
 //     Some(encrypted_data)
 // }
+
+mod big_array {
+    use serde_big_array::big_array;
+
+    big_array! { BigArray; }
+}
 
 /// SHA512 hash.
 #[derive(Copy, Clone, DataSize, Deserialize, Serialize)]

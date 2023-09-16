@@ -24,13 +24,15 @@ pub enum CommsError {
     ListenerConversion,
 }
 
+#[derive(Debug)]
 pub enum TLSError {
-    TcpConnection,
+    TcpConnection(io::Error),
     TcpNoDelay,
     CouldNotGenerateTLSPK,
     CouldNotGenerateTlsCertificate(ErrorStack),
     CouldNotExtractEcKey,
     TlsInitialization(String),
+    TlsHandshake(String),
     NoPeerCertificate,
     PeerCertificateInvalid,
     WrongSignatureAlgorithm,
@@ -45,6 +47,13 @@ pub enum TLSError {
     WrongCurve,
     FailedToValidateSignature,
     InvalidSignature,
+    InvalidSerialNumber,
+}
+
+impl From<TLSError> for CommsError {
+    fn from(value: TLSError) -> Self {
+        CommsError::Tls(value)
+    }
 }
 
 /// OpenSSL result type alias.

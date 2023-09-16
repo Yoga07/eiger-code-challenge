@@ -10,7 +10,7 @@ aes-gcm = "0.10.2"
 quinn = "0.10.1"
 rcgen = "0.11.1"
 rustls = { version = "0.21.5", default-features = false, features = ["quic", "dangerous_configuration"] }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time", "full"] }
 bytes = "1.4.0"
 tracing = "0.1.37"
 ed25519 = "2.2.1"
@@ -24,6 +24,7 @@ tokio-serde = { version = "0.8.0", features = ["bincode"] }
 openssl = "0.10.55"
 tokio-openssl = "0.6.1"
 datasize = { version = "0.2.11", features = ["detailed", "fake_clock-types", "futures-types", "smallvec-types"] }
+serde-big-array = "0.3.0"
 
 [[example]]
 name = "comms"

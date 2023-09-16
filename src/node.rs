@@ -1,7 +1,7 @@
 use crate::comms::{Comms, CHANNEL_SIZE};
 use crate::error::{Error, Result};
 use crate::event::{Event, LocalEvent};
-use crate::handshake::HandshakeHandler;
+use crate::CommsError;
 use bincode::serialize;
 use blsttc::{PublicKey, SecretKey};
 use bytes::Bytes;
@@ -23,27 +23,21 @@ pub struct Node {
 }
 
 impl Node {
-    pub async fn new(addr: SocketAddr, bootstrap_nodes: Vec<SocketAddr>) -> Result<Self> {
+    pub async fn new(our_addr: SocketAddr, bootstrap_nodes: Vec<SocketAddr>) -> Result<Self> {
         let (event_tx, event_rx) = channel::<(SocketAddr, Event)>(CHANNEL_SIZE);
-        let sk = blsttc::SecretKey::random();
-        let pk = sk.public_key();
 
-        let mut comms = Comms::new_node(addr, event_tx.clone())
+        let comms = Comms::new_node(our_addr, event_tx.clone())
             .await
             .map_err(Error::Comms)?;
 
-        info!("Started node at {}", comms.local_address()?);
+        info!("Started node at {}", comms.our_address().await?);
 
-        let addr = comms.local_address()?;
-
-        comms.con
-
-        // for node_addr in &bootstrap_nodes {
-        //     comms.new_connection(node_addr).await;
-        // }
+        for node_addr in &bootstrap_nodes {
+            comms.connect_to(node_addr).await?;
+        }
 
         let node = Node {
-            addr,
+            addr: our_addr,
             bootstrap_nodes,
             // handshake_handler: Arc::new(RwLock::new(hs_handler)),
             comms: Arc::new(RwLock::new(comms)),
@@ -58,15 +52,20 @@ impl Node {
         self.addr
     }
 
-    pub async fn connect_to(&mut self, addr: SocketAddr) {
-        self.comms.write().await.new_connection(&addr).await
+    pub async fn connect_to(&mut self, addr: SocketAddr) -> Result<()> {
+        self.comms
+            .write()
+            .await
+            .connect_to(&addr)
+            .await
+            .map_err(Error::Comms)
     }
 
     pub async fn send_event_to(&self, addr: SocketAddr, msg: Event) -> Result<()> {
         info!("Trying to send a message to {addr:?}");
         let serialized = serialize(&msg)?;
         self.comms
-            .read()
+            .write()
             .await
             .send_message_to(addr, Bytes::from(serialized))
             .await?;
@@ -75,31 +74,26 @@ impl Node {
     }
 
     pub async fn start_event_loop(&self) {
-        let node = self.clone();
+        // let node = self.clone();
         let event_rx = self.event_rx.clone();
         let _handle = tokio::spawn(async move {
             while let Some((peer, event)) = event_rx.write().await.recv().await {
-                trace!("Received {event:?} from {peer:?}");
+                println!("Received {event:?} from {peer:?}");
                 match event {
                     Event::Generic(message) => println!("Received string message {message:?}"),
-                    Event::Handshake(message) => node.handle_handshake(peer, message).await,
-                    Event::LocalEvent(local_msg) => {
-                        if let Err(e) = node.handle_local_event(local_msg).await {
-                            println!("Error handling local event {e:?}");
-                        }
-                    }
+                    // Event::LocalEvent(local_msg) => {
+                    //     if let Err(e) = node.handle_local_event(local_msg).await {
+                    //         println!("Error handling local event {e:?}");
+                    //     }
+                    // }
                 }
             }
         });
     }
 
-    pub async fn handle_local_event(&self, event: LocalEvent) -> Result<()> {
-        match event {
-            LocalEvent::SendEventTo(peer, event) => self.send_event_to(peer, *event).await,
-            LocalEvent::HandleHandshakeEvent((peer, hs_event)) => {
-                self.handle_handshake(peer, hs_event).await;
-                Ok(())
-            }
-        }
-    }
+    // pub async fn handle_local_event(&self, event: LocalEvent) -> Result<()> {
+    //     match event {
+    //         LocalEvent::SendEventTo(peer, event) => self.send_event_to(peer, *event).await,
+    //     }
+    // }
 }

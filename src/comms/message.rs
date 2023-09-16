@@ -1,5 +1,8 @@
 use crate::comms::error::CommsError;
 use bytes::{Bytes, BytesMut};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio_openssl::SslStream;
 
 const HEADER_BYTES_LEN: usize = 8;
 const PROTOCOL_VERSION: u16 = 0x0001;
@@ -49,7 +52,7 @@ impl CommsMessage {
     // Helper to write CommsMessage bytes to the provided stream.
     pub(crate) async fn write_to_stream(
         &self,
-        send_stream: &mut quinn::SendStream,
+        send_stream: &mut SslStream<TcpStream>,
     ) -> Result<(), CommsError> {
         // Let's generate the message bytes
         let CommsMessage { header, payload } = self;
@@ -62,7 +65,7 @@ impl CommsMessage {
         all_bytes.extend_from_slice(&header_bytes);
         all_bytes.extend_from_slice(payload);
 
-        // Send the header bytes over QUIC
+        // Send bytes of TcpStream
         send_stream
             .write_all(&all_bytes)
             .await

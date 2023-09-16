@@ -1,14 +1,16 @@
 use crate::comms::error::{SslResult, TLSError};
 use crate::utils::Sha512;
 use crate::CommsError;
+use datasize::DataSize;
 use openssl::asn1::{Asn1Integer, Asn1IntegerRef, Asn1Time};
 use openssl::bn::BigNum;
 use openssl::ec;
 use openssl::ec::EcKey;
 use openssl::error::ErrorStack;
 use openssl::nid::Nid;
-use openssl::pkey::{PKey, Private, Public};
-use openssl::x509::{X509Builder, X509Name, X509NameBuilder, X509NameRef, X509};
+use openssl::pkey::{PKey, PKeyRef, Private, Public};
+use openssl::ssl::{SslContextBuilder, SslVerifyMode, SslVersion};
+use openssl::x509::{X509Builder, X509Name, X509NameBuilder, X509NameRef, X509Ref, X509};
 use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,7 +32,7 @@ pub(crate) struct Identity {
     pub(super) network_ca: Option<Arc<X509>>,
 }
 
-pub(crate) fn with_generated_certs() -> Result<Self, CommsError> {
+pub(crate) fn with_generated_certs() -> Result<Identity, CommsError> {
     let (tls_certificate, secret_key) = generate_node_cert()
         .map_err(|e| CommsError::Tls(TLSError::CouldNotGenerateTlsCertificate(e)))?;
 
@@ -92,6 +94,29 @@ fn generate_cert(private_key: &PKey<Private>, cn: &str) -> SslResult<X509> {
     Ok(cert)
 }
 
+/// Sets common options of both acceptor and connector on TLS context.
+///
+/// Used internally to set various TLS parameters.
+pub fn set_context_options(
+    ctx: &mut SslContextBuilder,
+    cert: &X509Ref,
+    private_key: &PKeyRef<Private>,
+) -> SslResult<()> {
+    ctx.set_min_proto_version(Some(SslVersion::TLS1_3))?;
+
+    ctx.set_certificate(cert)?;
+    ctx.set_private_key(private_key)?;
+    ctx.check_private_key()?;
+
+    // Note that this does not seem to work as one might naively expect; the client can still send
+    // no certificate and there will be no error from OpenSSL. For this reason, we pass set `PEER`
+    // (causing the request of a cert), but pass all of them through and verify them after the
+    // handshake has completed.
+    ctx.set_verify_callback(SslVerifyMode::PEER, |_, _| true);
+
+    Ok(())
+}
+
 /// Checks that the cryptographic parameters on a certificate are correct and returns the
 /// fingerprint of the public key.
 ///
@@ -103,15 +128,17 @@ pub(crate) fn validate_self_signed_cert(cert: X509) -> Result<X509, TLSError> {
         return Err(TLSError::WrongSignatureAlgorithm);
     }
 
-    let subject = name_to_string(cert.subject_name()).map_err(TLSError::CorruptSubjectOrIssuer)?;
-    let issuer = name_to_string(cert.issuer_name()).map_err(TLSError::CorruptSubjectOrIssuer)?;
+    let subject =
+        name_to_string(cert.subject_name()).map_err(|_| TLSError::CorruptSubjectOrIssuer)?;
+    let issuer =
+        name_to_string(cert.issuer_name()).map_err(|_| TLSError::CorruptSubjectOrIssuer)?;
     if subject != issuer {
         // All of our certificates are self-signed, so it cannot hurt to check.
         return Err(TLSError::NotSelfSigned);
     }
 
     // All our certificates have serial number 1.
-    if !num_eq(cert.serial_number(), 1).map_err(ValidationError::InvalidSerialNumber)? {
+    if !num_eq(cert.serial_number(), 1).map_err(|_| TLSError::InvalidSerialNumber)? {
         return Err(TLSError::WrongSerialNumber);
     }
 
@@ -128,7 +155,7 @@ pub(crate) fn validate_self_signed_cert(cert: X509) -> Result<X509, TLSError> {
     // Finally we can check the actual signature.
     if !cert
         .verify(&public_key)
-        .map_err(TLSError::FailedToValidateSignature)?
+        .map_err(|_| TLSError::FailedToValidateSignature)?
     {
         return Err(TLSError::InvalidSignature);
     }
@@ -204,10 +231,10 @@ fn num_eq(num: &Asn1IntegerRef, other: u32) -> SslResult<bool> {
 
 /// Check cert's expiration times against current time.
 fn validate_cert_expiration_date(cert: &X509) -> Result<(), TLSError> {
-    let asn1_now = Asn1Time::from_unix(now()).map_err(TLSError::TimeIssue)?;
+    let asn1_now = Asn1Time::from_unix(now()).map_err(|_| TLSError::TimeIssue)?;
     if asn1_now
         .compare(cert.not_before())
-        .map_err(TLSError::TimeIssue)?
+        .map_err(|_| TLSError::TimeIssue)?
         != Ordering::Greater
     {
         return Err(TLSError::NotYetValid);
@@ -215,7 +242,7 @@ fn validate_cert_expiration_date(cert: &X509) -> Result<(), TLSError> {
 
     if asn1_now
         .compare(cert.not_after())
-        .map_err(TLSError::TimeIssue)?
+        .map_err(|_| TLSError::TimeIssue)?
         != Ordering::Less
     {
         return Err(TLSError::Expired);
@@ -225,11 +252,13 @@ fn validate_cert_expiration_date(cert: &X509) -> Result<(), TLSError> {
 }
 
 /// Validate cert's public key, and it's EC key parameters.
-fn validate_cert_ec_key(cert: &X509) -> Result<(PKey<Public>, EcKey<Public>), ValidationError> {
-    let public_key = cert.public_key().map_err(TLSError::CannotReadPublicKey)?;
+fn validate_cert_ec_key(cert: &X509) -> Result<(PKey<Public>, EcKey<Public>), TLSError> {
+    let public_key = cert
+        .public_key()
+        .map_err(|_| TLSError::CannotReadPublicKey)?;
     let ec_key = public_key
         .ec_key()
-        .map_err(TLSError::CouldNotExtractEcKey)?;
-    ec_key.check_key().map_err(TLSError::KeyFailsCheck)?;
+        .map_err(|_| TLSError::CouldNotExtractEcKey)?;
+    ec_key.check_key().map_err(|_| TLSError::KeyFailsCheck)?;
     Ok((public_key, ec_key))
 }
