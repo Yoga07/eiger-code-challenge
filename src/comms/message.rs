@@ -1,6 +1,6 @@
 use crate::comms::error::CommsError;
 use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_openssl::SslStream;
 

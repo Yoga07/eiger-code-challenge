@@ -6,7 +6,6 @@ use openssl::asn1::{Asn1Integer, Asn1IntegerRef, Asn1Time};
 use openssl::bn::BigNum;
 use openssl::ec;
 use openssl::ec::EcKey;
-use openssl::error::ErrorStack;
 use openssl::nid::Nid;
 use openssl::pkey::{PKey, PKeyRef, Private, Public};
 use openssl::ssl::{SslContextBuilder, SslVerifyMode, SslVersion};

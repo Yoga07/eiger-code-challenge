@@ -5,30 +5,26 @@ mod tls_utils;
 pub use error::CommsError;
 use std::collections::btree_map::BTreeMap;
 
+use crate::casper_types::message::Message;
 use crate::comms::error::{SslResult, TLSError};
 use crate::comms::message::CommsMessage;
 use crate::comms::tls_utils::{
-    generate_node_cert, set_context_options, validate_self_signed_cert, with_generated_certs,
-    Identity,
+    set_context_options, validate_self_signed_cert, with_generated_certs, Identity,
 };
-use crate::event::Event;
-use bincode::deserialize;
 use bytes::Bytes;
 use openssl::pkey::{PKeyRef, Private};
 use openssl::ssl::{Ssl, SslAcceptor, SslConnector, SslMethod};
 use openssl::x509::X509Ref;
-use quinn::{Connection, RecvStream, SendStream};
-use serde_big_array::big_array;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_openssl::SslStream;
-use tracing::{debug, error, info, trace};
+use tracing::{error, info, trace};
 
 /// Channel bounds
 pub(crate) const CHANNEL_SIZE: usize = 10_000;
@@ -43,9 +39,9 @@ pub struct Comms {
 }
 
 impl Comms {
-    pub async fn new_node(
+    pub async fn new_node<P>(
         addr: SocketAddr,
-        event_tx: Sender<(SocketAddr, Event)>,
+        event_tx: Sender<(SocketAddr, Message<P>)>,
     ) -> Result<Self, CommsError> {
         println!("[{addr:?}] Starting std::tcp listener");
         let listener = std::net::TcpListener::bind(addr)
@@ -89,7 +85,7 @@ impl Comms {
             .await
             .map_err(|e| TLSError::TcpConnection(e))?;
 
-        stream.set_nodelay(true).map_err(|e| TLSError::TcpNoDelay)?;
+        stream.set_nodelay(true).map_err(|_| TLSError::TcpNoDelay)?;
 
         let transport =
             Self::create_tls_connector(&self.identity.tls_certificate, &self.identity.secret_key)
@@ -214,17 +210,15 @@ impl Comms {
         });
     }
 
-    pub async fn listen_to_connection_pool(&self, event_tx: Sender<(SocketAddr, Event)>) {
+    pub async fn listen_to_connection_pool<P>(&self, _event_tx: Sender<(SocketAddr, Message<P>)>) {
         println!("Starting conn pool listener thread");
         let all_receivers = self.connection_pool.clone();
         let _handle = tokio::spawn(async move {
-            println!("Starteddddd conn pool listener thread");
             loop {
-                for stream in all_receivers.lock().await.values_mut() {
+                for (addr, stream) in all_receivers.lock().await.iter_mut() {
                     let (mut reader, _writer) = tokio::io::split(stream);
                     // Create a buffer to read incoming data
                     let mut buffer = [0u8; 1024 * 1024]; // 1 MB buffer
-                    println!("reading with buffer");
                     if let Ok(msg) =
                         timeout(Duration::from_millis(1), reader.read(&mut buffer)).await
                     {
@@ -232,7 +226,11 @@ impl Comms {
                             Ok(bytes_read) => {
                                 if bytes_read == 0 {
                                     // The client has disconnected
-                                    println!("Disconnected.");
+                                    println!("Peer {addr:?} has disconnected.");
+                                    println!("Removing them from connection pool.");
+
+                                    // Remove them from our conn pool
+                                    let _ = all_receivers.lock().await.remove(addr);
                                 }
 
                                 // Handle the data received from the client
