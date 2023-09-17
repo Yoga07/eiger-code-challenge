@@ -1,11 +1,11 @@
-use std::fmt::{Debug, Display, Formatter};
 use crate::casper_types::crypto::ConsensusCertificate;
 use crate::casper_types::Nonce;
 use casper_hashing::Digest;
 use casper_types::ProtocolVersion;
-use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::fmt::{Debug, Display, Formatter};
+use std::net::SocketAddr;
 use strum::EnumDiscriminants;
 
 #[derive(Clone, Debug, Deserialize, Serialize, EnumDiscriminants)]
@@ -53,8 +53,6 @@ fn default_protocol_version() -> ProtocolVersion {
 ///
 /// Payloads are what is transferred across the network outside of control messages from the
 /// networking component itself.
-pub trait Payload:
-Serialize + DeserializeOwned + Clone + Debug + Send + Sync + 'static
-{}
+pub trait Payload: Serialize + DeserializeOwned + Clone + Debug + Send + Sync + 'static {}
 
 impl<P: Payload> Message<P> {}

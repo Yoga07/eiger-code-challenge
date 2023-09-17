@@ -1,3 +1,4 @@
+use crate::casper_types::chainspec::Error as ChainspecError;
 use crate::CommsError;
 use bincode::ErrorKind;
 
@@ -9,11 +10,18 @@ pub enum Error {
     Comms(CommsError),
     Bincode(ErrorKind),
     HandShake(String),
+    Chainspec(ChainspecError),
 }
 
 impl From<CommsError> for Error {
     fn from(value: CommsError) -> Self {
         Error::Comms(value)
+    }
+}
+
+impl From<ChainspecError> for Error {
+    fn from(value: ChainspecError) -> Self {
+        Error::Chainspec(value)
     }
 }
 

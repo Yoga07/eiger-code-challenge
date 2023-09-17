@@ -6,44 +6,52 @@ pub use error::CommsError;
 use std::collections::btree_map::BTreeMap;
 
 use crate::casper_types::message::{Message, Payload};
+use crate::casper_types::ser_deser::MessagePackFormat;
+use crate::casper_types::Nonce;
 use crate::comms::error::{SslResult, TLSError};
 use crate::comms::message::CommsMessage;
 use crate::comms::tls_utils::{
     set_context_options, validate_self_signed_cert, with_generated_certs, Identity,
 };
 use bytes::{Bytes, BytesMut};
+use casper_hashing::Digest;
+use casper_types::ProtocolVersion;
+use futures::{SinkExt, StreamExt};
 use openssl::pkey::{PKeyRef, Private};
 use openssl::ssl::{Ssl, SslAcceptor, SslConnector, SslMethod};
 use openssl::x509::X509Ref;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_openssl::SslStream;
-use tokio_serde::Deserializer;
+use tokio_serde::{Deserializer, Serializer};
+use tokio_util::codec::LengthDelimitedCodec;
 use tracing::{error, info, trace};
-use crate::casper_types::ser_deser::MessagePackFormat;
 
 /// Channel bounds
 pub(crate) const CHANNEL_SIZE: usize = 10_000;
 
 pub(crate) const IDLE_TIMEOUT: usize = 60 * 60 * 1_000; // 3600s
 
+pub type FramedTransport = tokio_util::codec::Framed<SslStream<TcpStream>, LengthDelimitedCodec>;
+
 pub struct Comms {
-    #[allow(clippy::type_complexity)]
+    our_address: SocketAddr,
     tcp_ep: Arc<Mutex<TcpListener>>,
     identity: Identity,
-    connection_pool: Arc<Mutex<BTreeMap<SocketAddr, SslStream<TcpStream>>>>,
+    connection_pool: Arc<Mutex<BTreeMap<SocketAddr, FramedTransport>>>,
 }
 
 impl Comms {
     pub async fn new_node<P: Payload>(
         addr: SocketAddr,
         event_tx: Sender<(SocketAddr, Message<P>)>,
+        chainspec_hash: Digest,
     ) -> Result<Self, CommsError> {
         println!("[{addr:?}] Starting std::tcp listener");
         let listener = std::net::TcpListener::bind(addr)
@@ -59,6 +67,7 @@ impl Comms {
         let new_identity = with_generated_certs()?;
 
         let comms = Comms {
+            our_address: addr,
             connection_pool: Arc::new(Mutex::new(BTreeMap::new())),
             tcp_ep: Arc::new(Mutex::new(tcp_ep)),
             identity: new_identity,
@@ -68,17 +77,15 @@ impl Comms {
 
         comms.listen_on_endpoint().await;
 
-        comms.listen_to_connection_pool(event_tx).await;
+        comms
+            .listen_to_connection_pool(event_tx, chainspec_hash)
+            .await;
 
         Ok(comms)
     }
 
-    pub async fn our_address(&self) -> Result<SocketAddr, CommsError> {
-        self.tcp_ep
-            .lock()
-            .await
-            .local_addr()
-            .map_err(|e| CommsError::Io(e.to_string()))
+    pub fn our_address(&self) -> SocketAddr {
+        self.our_address
     }
 
     pub async fn connect_to(&self, peer_addr: &SocketAddr) -> Result<(), CommsError> {
@@ -109,10 +116,18 @@ impl Comms {
 
         info!("Validated Peer Cert");
 
+        // Frame the transport
+        let framed_transport = tokio_util::codec::Framed::new(
+            transport,
+            LengthDelimitedCodec::builder()
+                .max_frame_length(25165824 as usize)
+                .new_codec(),
+        );
+
         self.connection_pool
             .lock()
             .await
-            .insert(peer_addr.clone(), transport);
+            .insert(peer_addr.clone(), framed_transport);
         Ok(())
     }
     /// Creates a TLS acceptor for a client.
@@ -204,55 +219,107 @@ impl Comms {
                     }
                 };
 
+                // Frame the transport
+                let framed_transport = tokio_util::codec::Framed::new(
+                    transport,
+                    LengthDelimitedCodec::builder()
+                        .max_frame_length(25165824 as usize)
+                        .new_codec(),
+                );
+
                 // insert into connection pool
-                let _ = connection_pool.lock().await.insert(peer_addr, transport);
+                let _ = connection_pool
+                    .lock()
+                    .await
+                    .insert(peer_addr, framed_transport);
                 trace!("Inserted new conn!");
                 println!("Inserted new conn!");
             }
         });
     }
 
-    pub async fn listen_to_connection_pool<P: Payload>(&self, _event_tx: Sender<(SocketAddr, Message<P>)>) {
+    pub async fn listen_to_connection_pool<P: Payload>(
+        &self,
+        event_tx: Sender<(SocketAddr, Message<P>)>,
+        chainspec_hash: Digest,
+    ) {
         println!("Starting conn pool listener thread");
+        let our_addr = self.our_address();
         let all_receivers = self.connection_pool.clone();
         let _handle = tokio::spawn(async move {
             loop {
                 for (addr, stream) in all_receivers.lock().await.iter_mut() {
-                    let (mut reader, _writer) = tokio::io::split(stream);
+                    // let (mut reader, mut writer) = tokio::io::split(stream);
+
+                    let (mut writer, mut reader) = stream.split();
                     // Create a buffer to read incoming data
-                    let mut buffer = [0u8; 1024 * 1024]; // 1 MB buffer
-                    if let Ok(msg) =
-                        timeout(Duration::from_millis(1), reader.read(&mut buffer)).await
-                    {
+                    // let mut buffer = [0u8; 1024 * 1024]; // 1 MB buffer
+                    if let Ok(Some(msg)) = timeout(Duration::from_millis(1), reader.next()).await {
                         match msg {
                             Ok(bytes_read) => {
-                                if bytes_read == 0 {
-                                    // The client has disconnected
-                                    println!("Peer {addr:?} has disconnected.");
-                                    println!("Removing them from connection pool.");
-
-                                    // Remove them from our conn pool
-                                    let _ = all_receivers.lock().await.remove(addr);
-                                }
+                                // if bytes_read == 0 {
+                                //     // The client has disconnected
+                                //     println!("Peer {addr:?} has disconnected.");
+                                //     println!("Removing them from connection pool.");
+                                //
+                                //     // Remove them from our conn pool
+                                //     let _ = all_receivers.lock().await.remove(addr);
+                                // }
 
                                 // Handle the data received from the client
-                                let data = &buffer[..bytes_read];
+                                // let data = &buffer[4..bytes_read]; // remove appended data
+                                // let bytes = BytesMut::from(data);
 
-                                println!("Data from Casper {data:?}");
+                                println!("Data from Casper {bytes_read:?}");
 
                                 let mut encoder = MessagePackFormat;
 
                                 let remote_message: Message<P> = match Pin::new(&mut encoder)
-                                    .deserialize(&BytesMut::from(data))
-                                    .map_err(|e|CommsError::InvalidRemoteHandshakeMessage(e.to_string())) {
-                                    Ok(x) => {x},
+                                    .deserialize(&bytes_read)
+                                    .map_err(|e| {
+                                        CommsError::InvalidRemoteHandshakeMessage(e.to_string())
+                                    }) {
+                                    Ok(x) => x,
                                     Err(e) => {
                                         println!("Error deserializing DATA FROM CASPER!: {e:?}");
-                                        continue
+                                        continue;
                                     }
                                 };
 
-                                println!("Received DATA FROM CASPER!: {:?}", remote_message);
+                                // Notify the event loop
+                                let _ = event_tx.send((addr.clone(), remote_message.clone())).await;
+
+                                // Send back a handshake message
+                                let hs: Message<P> = Message::Handshake {
+                                    network_name: "casper-example".to_string(),
+                                    public_addr: our_addr,
+                                    protocol_version: ProtocolVersion::V1_0_0,
+                                    consensus_certificate: None,
+                                    is_syncing: false,
+                                    chainspec_hash: Some(chainspec_hash),
+                                };
+
+                                // let ping: Message<P> = Message::Ping { nonce: Nonce::new(5 as u64) };
+
+                                match Pin::new(&mut encoder)
+                                    .serialize(&Arc::new(hs))
+                                    .map_err(|e| {
+                                        CommsError::CouldNotEncodeOurHandshake(e.to_string())
+                                    }) {
+                                    Ok(bytes) => {
+                                        println!("BYTES TO BE SENT TO CASPER {bytes:?}");
+                                        if let Err(e) = writer.send(bytes).await {
+                                            println!("Error sending data to CASPER!: {e:?}");
+                                            continue;
+                                        }
+
+                                        println!("Sent message to CASPER!");
+                                    }
+                                    Err(e) => {
+                                        println!("Error serializing handshake for Casper!: {e:?}");
+                                        continue;
+                                    }
+                                }
                             }
                             Err(e) => {
                                 println!("Error reading from client: {:?}", e);

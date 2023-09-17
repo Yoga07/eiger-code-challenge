@@ -22,7 +22,7 @@ pub enum CommsError {
     ListenerCreation(io::Error),
     ListenerSetNonBlocking,
     ListenerConversion,
-    CouldNotEncodeOurHandshake,
+    CouldNotEncodeOurHandshake(String),
     InvalidRemoteHandshakeMessage(String),
 }
 

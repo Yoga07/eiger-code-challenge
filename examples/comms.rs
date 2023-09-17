@@ -1,10 +1,10 @@
-use std::fmt::{Display, Formatter};
+use eiger_code_challenge::casper_types::message::Payload;
 use eiger_code_challenge::node::Node;
+use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::time::sleep;
-use eiger_code_challenge::casper_types::message::Payload;
 
 #[tokio::main]
 async fn main() {
@@ -35,18 +35,19 @@ async fn main() {
     let node = match Node::new(address2, vec![]).await {
         Ok(mut node2) => {
             println!("started node 2");
-            node2
-            // node2.start_event_loop().await;
-            // node2.connect_to(address1).await.unwrap();
+            node2.start_event_loop().await;
+            let _ = node2.send_handshake_to::<Vec<u8>>(address1).await;
+            loop {
+                sleep(Duration::from_secs(1)).await;
+            }
         }
         Err(e) => {
             println!("Error starting node {e:?}");
-            return
+            return;
         }
     };
 
     loop {
-        let _ = node.send_handshake_to::<Vec<u8>>(address1).await;
         // node2
         //     .send_event_to(address1, Event::Generic("Hi there!".to_string()))
         //     .await

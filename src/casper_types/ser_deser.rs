@@ -18,8 +18,8 @@ use tokio_serde::{Deserializer, Serializer};
 pub struct MessagePackFormat;
 
 impl<M> Serializer<M> for MessagePackFormat
-    where
-        M: Serialize,
+where
+    M: Serialize,
 {
     // Note: We cast to `io::Error` because of the `Codec::Error: Into<Transport::Error>`
     // requirement.
@@ -34,8 +34,8 @@ impl<M> Serializer<M> for MessagePackFormat
 }
 
 impl<M> Deserializer<M> for MessagePackFormat
-    where
-            for<'de> M: Deserialize<'de>,
+where
+    for<'de> M: Deserialize<'de>,
 {
     type Error = io::Error;
 
