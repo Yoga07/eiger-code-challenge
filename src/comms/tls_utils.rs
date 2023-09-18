@@ -13,6 +13,7 @@ use openssl::x509::{X509Builder, X509Name, X509NameBuilder, X509NameRef, X509Ref
 use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::info;
 
 /// Casper's chosen signature algorithm (**ECDSA  with SHA512**).
 const SIGNATURE_ALGORITHM: Nid = Nid::ECDSA_WITH_SHA512;
@@ -32,6 +33,7 @@ pub(crate) struct Identity {
 }
 
 pub(crate) fn with_generated_certs() -> Result<Identity, CommsError> {
+    info!("Generating new keys and certificates");
     let (tls_certificate, secret_key) = generate_node_cert()
         .map_err(|e| CommsError::Tls(TLSError::CouldNotGenerateTlsCertificate(e)))?;
 

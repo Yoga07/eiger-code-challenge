@@ -7,7 +7,8 @@ use datasize::DataSize;
 use serde::{Deserialize, Serialize};
 
 use casper_types::{
-    bytesrepr::{self, FromBytes, ToBytes}, ProtocolVersion
+    bytesrepr::{self, FromBytes, ToBytes},
+    ProtocolVersion,
 };
 
 use super::{ActivationPoint, GlobalStateUpdate};

@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 mod big_array {
     use serde_big_array::big_array;
@@ -75,5 +77,28 @@ impl PartialOrd for Sha512 {
 impl Debug for Sha512 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", base16::encode_lower(&self.0[..]))
+    }
+}
+
+pub fn setup_logging(to_file: bool) {
+    // Configure the tracing subscriber with a filter.
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("info"))
+        .expect("Failed to create filter from default env or 'info' filter.");
+
+    // Create a custom subscriber that logs to the file.
+    let subscriber_builder = FmtSubscriber::builder().with_env_filter(filter);
+
+    if to_file {
+        // Create a log file appender that rolls the log file when it reaches a certain size.
+        let appender = RollingFileAppender::new(Rotation::HOURLY, "", "eiger_node.log");
+
+        // Set the tracing subscriber as the global subscriber.
+        tracing::subscriber::set_global_default(subscriber_builder.with_writer(appender).finish())
+            .expect("Failed to set the global tracing subscriber");
+    } else {
+        // Set the tracing subscriber as the global subscriber.
+        tracing::subscriber::set_global_default(subscriber_builder.finish())
+            .expect("Failed to set the global tracing subscriber");
     }
 }

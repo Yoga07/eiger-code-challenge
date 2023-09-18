@@ -4,7 +4,9 @@ mod tls_utils;
 
 pub use error::CommsError;
 use std::collections::btree_map::BTreeMap;
+use std::io;
 
+use crate::casper_types::chainspec::Chainspec;
 use crate::casper_types::message::{Message, Payload};
 use crate::casper_types::ser_deser::MessagePackFormat;
 use crate::comms::error::{SslResult, TLSError};
@@ -13,8 +15,6 @@ use crate::comms::tls_utils::{
     set_context_options, validate_self_signed_cert, with_generated_certs, Identity,
 };
 use bytes::Bytes;
-use casper_hashing::Digest;
-use casper_types::ProtocolVersion;
 use futures::{SinkExt, StreamExt};
 use openssl::pkey::{PKeyRef, Private};
 use openssl::ssl::{Ssl, SslAcceptor, SslConnector, SslMethod};
@@ -26,16 +26,20 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{interval, timeout, Duration};
 use tokio_openssl::SslStream;
 use tokio_serde::{Deserializer, Serializer};
 use tokio_util::codec::LengthDelimitedCodec;
-use tracing::{error, info, trace};
+use tracing::{debug, error, info, trace};
 
 /// Channel bounds
 pub(crate) const CHANNEL_SIZE: usize = 10_000;
 
+/// Maximum frame length to be decoded from incoming stream
 pub const MAX_FRAME_LEN: usize = 25165824; // 25 MB as Bytes
+
+/// Connection Pool polling rate
+pub const POLLING_RATE: u64 = 1; // 1 ms
 
 pub type FramedTransport = tokio_util::codec::Framed<SslStream<TcpStream>, LengthDelimitedCodec>;
 
@@ -43,6 +47,7 @@ pub struct Comms {
     our_address: SocketAddr,
     tcp_ep: Arc<Mutex<TcpListener>>,
     identity: Identity,
+    chainspec: Chainspec,
     connection_pool: Arc<Mutex<BTreeMap<SocketAddr, FramedTransport>>>,
     endpoint_listener_handle: Option<JoinHandle<()>>,
     conn_pool_listener_handle: Option<JoinHandle<()>>,
@@ -52,18 +57,12 @@ impl Comms {
     pub async fn new_node<P: Payload>(
         addr: SocketAddr,
         event_tx: Sender<(SocketAddr, Message<P>)>,
-        chainspec_hash: Digest,
+        chainspec: Chainspec,
     ) -> Result<Self, CommsError> {
-        println!("[{addr:?}] Starting std::tcp listener");
-        let listener = std::net::TcpListener::bind(addr).map_err(CommsError::ListenerCreation)?;
-
-        // We must set non-blocking to `true` or else the tokio task hangs forever.
-        listener
-            .set_nonblocking(true)
-            .map_err(|_| CommsError::ListenerSetNonBlocking)?;
-
-        println!("[{addr:?}] Converting std::tcp listener to tokio");
-        let tcp_ep = TcpListener::from_std(listener).map_err(|_| CommsError::ListenerConversion)?;
+        debug!("Starting Tokio::net::TcpListener");
+        let tcp_ep = TcpListener::bind(addr)
+            .await
+            .map_err(|_| CommsError::ListenerConversion)?;
         let new_identity = with_generated_certs()?;
 
         let mut comms = Comms {
@@ -73,17 +72,17 @@ impl Comms {
             identity: new_identity,
             endpoint_listener_handle: None,
             conn_pool_listener_handle: None,
+            chainspec,
         };
 
-        println!("[{addr:?}] Created comms!");
-
         let endpoint_listener_handle = comms.listen_on_endpoint().await;
-        let conn_pool_listener_handle = comms
-            .listen_to_connection_pool(event_tx, chainspec_hash)
-            .await;
+        let conn_pool_listener_handle = comms.listen_to_connection_pool(event_tx).await;
 
         comms.endpoint_listener_handle = Some(endpoint_listener_handle);
         comms.conn_pool_listener_handle = Some(conn_pool_listener_handle);
+
+        info!("Network communications started!");
+        trace!("Waiting for incoming connections...");
 
         Ok(comms)
     }
@@ -105,7 +104,7 @@ impl Comms {
                 .and_then(|connector| connector.configure())
                 .and_then(|mut config| {
                     config.set_verify_hostname(false);
-                    config.into_ssl("this-will-not-be-checked.example.com")
+                    config.into_ssl("random.example.com")
                 })
                 .and_then(|ssl| SslStream::new(ssl, stream))
                 .map_err(|e| TLSError::TlsInitialization(e.to_string()))?;
@@ -119,7 +118,6 @@ impl Comms {
         let _validated_peer_cert = validate_self_signed_cert(peer_cert)?;
 
         info!("Validated Peer Cert");
-
         // Frame the transport
         let framed_transport = tokio_util::codec::Framed::new(
             transport,
@@ -168,11 +166,12 @@ impl Comms {
         let connection_pool = self.connection_pool.clone();
         let identity = self.identity.clone();
         let tcp_ep = self.tcp_ep.clone();
-        trace!("Starting to listen!");
+        info!("Starting to listen on TCP Endpoint for incoming connections");
         tokio::spawn(async move {
             while let Ok((stream, peer_addr)) = tcp_ep.lock().await.accept().await {
-                trace!("New connection received!");
+                info!("New connection received!");
 
+                info!("Setting up TLS with connected peer");
                 let mut transport: SslStream<TcpStream> = match Self::create_tls_acceptor(
                     identity.tls_certificate.as_ref(),
                     identity.secret_key.as_ref(),
@@ -188,14 +187,16 @@ impl Comms {
                     }
                 };
 
+                info!("Starting TLS level handshake");
                 if let Err(e) = SslStream::accept(Pin::new(&mut transport))
                     .await
                     .map_err(|e| CommsError::Tls(TLSError::TlsHandshake(e.to_string())))
                 {
-                    error!("Error accepting connection at endpoint {e:?}");
+                    error!("Error accepting connection to endpoint {e:?}");
                     continue;
                 }
 
+                info!("Receiving peer's Ssl certificates");
                 let peer_cert = match transport
                     .ssl()
                     .peer_certificate()
@@ -208,7 +209,9 @@ impl Comms {
                     }
                 };
 
+                info!("Verifying peer's certificates for sanity");
                 // We'll validate them just as Casper does to maintain integrity
+                // We won't be storing them as we won't be holding connections after handshake
                 let _validated_peer_cert = match validate_self_signed_cert(peer_cert) {
                     Ok(peer_cert) => peer_cert,
                     Err(e) => {
@@ -217,6 +220,7 @@ impl Comms {
                     }
                 };
 
+                info!("Framing the stream to match Casper's encoding");
                 // Frame the transport
                 let framed_transport = tokio_util::codec::Framed::new(
                     transport,
@@ -225,13 +229,12 @@ impl Comms {
                         .new_codec(),
                 );
 
+                info!("Inserting stream into our connection pool");
                 // insert into connection pool
                 let _ = connection_pool
                     .lock()
                     .await
                     .insert(peer_addr, framed_transport);
-                trace!("Inserted new conn!");
-                println!("Inserted new conn!");
             }
         })
     }
@@ -239,75 +242,87 @@ impl Comms {
     pub async fn listen_to_connection_pool<P: Payload>(
         &self,
         event_tx: Sender<(SocketAddr, Message<P>)>,
-        chainspec_hash: Digest,
     ) -> JoinHandle<()> {
-        println!("Starting conn pool listener thread");
+        info!("Starting connection pool listener thread");
         let our_addr = self.our_address();
         let all_receivers = self.connection_pool.clone();
+        let chainspec = self.chainspec.clone();
         tokio::spawn(async move {
+            // Polling interval
+            let mut interval = interval(Duration::from_millis(POLLING_RATE));
+
             loop {
+                // Wait for the polling to happen
+                interval.tick().await;
+
                 for (addr, stream) in all_receivers.lock().await.iter_mut() {
+                    // Split into a bi-directional stream
                     let (mut writer, mut reader) = stream.split();
-                    if let Ok(Some(msg)) = timeout(Duration::from_millis(1), reader.next()).await {
+
+                    if let Ok(Some(msg)) =
+                        timeout(Duration::from_millis(POLLING_RATE), reader.next()).await
+                    {
                         match msg {
                             Ok(bytes_read) => {
-                                println!("Data from Casper {bytes_read:?}");
-
                                 let mut encoder = MessagePackFormat;
+                                let remote_message: Result<Message<P>, io::Error> =
+                                    Pin::new(&mut encoder).deserialize(&bytes_read);
 
-                                let remote_message: Message<P> = match Pin::new(&mut encoder)
-                                    .deserialize(&bytes_read)
-                                    .map_err(|e| {
-                                        CommsError::InvalidRemoteHandshakeMessage(e.to_string())
-                                    }) {
-                                    Ok(x) => x,
-                                    Err(e) => {
-                                        println!("Error deserializing DATA FROM CASPER!: {e:?}");
-                                        continue;
-                                    }
-                                };
+                                if let Ok(msg) = remote_message {
+                                    match msg {
+                                        Message::Handshake { .. } => {
+                                            // Notify the event loop
+                                            let _ = event_tx.send((*addr, msg)).await;
 
-                                // Notify the event loop
-                                let _ = event_tx.send((*addr, remote_message.clone())).await;
+                                            // Send back a handshake message on the same stream
+                                            let hs: Message<P> = Message::Handshake {
+                                                network_name: chainspec.network_config.name.clone(),
+                                                public_addr: our_addr,
+                                                protocol_version: chainspec.protocol_version(),
+                                                consensus_certificate: None, // not required
+                                                is_syncing: false,           // not required
+                                                chainspec_hash: Some(chainspec.hash()),
+                                            };
 
-                                // Send back a handshake message
-                                let hs: Message<P> = Message::Handshake {
-                                    network_name: "casper-example".to_string(),
-                                    public_addr: our_addr,
-                                    protocol_version: ProtocolVersion::V1_0_0,
-                                    consensus_certificate: None,
-                                    is_syncing: false,
-                                    chainspec_hash: Some(chainspec_hash),
-                                };
-
-                                match Pin::new(&mut encoder)
-                                    .serialize(&Arc::new(hs))
-                                    .map_err(|e| {
-                                        CommsError::CouldNotEncodeOurHandshake(e.to_string())
-                                    }) {
-                                    Ok(bytes) => {
-                                        println!("BYTES TO BE SENT TO CASPER {bytes:?}");
-                                        if let Err(e) = writer.send(bytes).await {
-                                            println!("Error sending data to CASPER!: {e:?}");
-                                            continue;
+                                            // Serialize our handshake
+                                            match Pin::new(&mut encoder)
+                                                .serialize(&Arc::new(hs))
+                                                .map_err(|e| {
+                                                    CommsError::CouldNotEncodeOurHandshake(
+                                                        e.to_string(),
+                                                    )
+                                                }) {
+                                                Ok(bytes) => {
+                                                    trace!("BYTES TO BE SENT TO CASPER {bytes:?}");
+                                                    if let Err(e) = writer.send(bytes).await {
+                                                        error!(
+                                                            "Error sending data to CASPER!: {e:?}"
+                                                        );
+                                                        continue;
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    error!("Error serializing handshake for Casper!: {e:?}");
+                                                    continue;
+                                                }
+                                            }
                                         }
-
-                                        println!("Sent message to CASPER!");
+                                        _ => {
+                                            info!("Ignoring post-handshake traffic from Casper");
+                                            println!("Ignoring post-handshake traffic from Casper");
+                                        }
                                     }
-                                    Err(e) => {
-                                        println!("Error serializing handshake for Casper!: {e:?}");
-                                        continue;
-                                    }
+                                } else {
+                                    info!("Ignoring post-handshake traffic which is encoded in a different format");
+                                    info!("HandShake success!");
+                                    println!("Ignoring post-handshake traffic which is encoded in a different format");
                                 }
                             }
                             Err(e) => {
-                                println!("Error reading from client: {:?}", e);
+                                error!("Error reading from client: {:?}", e);
                             }
                         }
                     }
-
-                    // Polling interval
-                    sleep(Duration::from_millis(5)).await;
                 }
             }
         })

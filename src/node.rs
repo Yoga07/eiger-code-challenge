@@ -3,6 +3,7 @@ use crate::casper_types::message::{Message, Payload};
 use crate::casper_types::ser_deser::MessagePackFormat;
 use crate::comms::{Comms, CHANNEL_SIZE};
 use crate::error::{Error, Result};
+use crate::utils::setup_logging;
 use casper_types::ProtocolVersion;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -12,25 +13,35 @@ use tokio::sync::mpsc::{channel, Receiver};
 use tokio::sync::RwLock;
 use tokio_serde::Serializer;
 use tracing::info;
-// use tracing::error;
+
+// Placeholder for the casper_types::message::Message's generic.
+// Required by the event loop channels
+impl Payload for Vec<u8> {}
+
+type EventReceiver = Receiver<(SocketAddr, Message<Vec<u8>>)>;
 
 #[derive(Clone)]
 pub struct Node {
     addr: SocketAddr,
     comms: Arc<RwLock<Comms>>,
     #[allow(clippy::type_complexity)]
-    event_rx: Arc<RwLock<Receiver<(SocketAddr, Message<Vec<u8>>)>>>,
+    event_rx: Arc<RwLock<EventReceiver>>,
 }
-
-impl Payload for Vec<u8> {}
 
 impl Node {
     pub async fn new(our_addr: SocketAddr) -> Result<Self> {
+        // We'll be logging to console by default.
+        // Update this in case we choose to have a config file.
+        setup_logging(false);
+
+        // Channels for event loop
         let (event_tx, event_rx) = channel(CHANNEL_SIZE);
 
+        // Read chainspec to match chainspec of Casper
         let chainspec = Chainspec::from_path(PathBuf::from("chainspec.toml"))?;
 
-        let comms = Comms::new_node(our_addr, event_tx, chainspec.hash())
+        // Initialize communications
+        let comms = Comms::new_node(our_addr, event_tx, chainspec)
             .await
             .map_err(Error::Comms)?;
 
@@ -85,9 +96,12 @@ impl Node {
 
     pub async fn start_event_loop(&self) {
         let event_rx = self.event_rx.clone();
+        info!("Starting event loop for node");
         while let Some((peer, message)) = event_rx.write().await.recv().await {
             match message {
                 Message::Handshake { .. } => {
+                    // Just log it, we are not going to process it here.
+                    // Comms module takes care of the replying since it is a protocol level message.
                     info!("Received a Handshake from Peer {peer:?}!");
                 }
                 _ => info!("Received a different message {message:?}"),
