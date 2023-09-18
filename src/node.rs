@@ -60,7 +60,7 @@ impl Node {
         self.addr
     }
 
-    pub async fn connect_to(&mut self, addr: SocketAddr) -> Result<()> {
+    pub async fn connect_to(&self, addr: SocketAddr) -> Result<()> {
         self.comms
             .write()
             .await
@@ -90,26 +90,28 @@ impl Node {
             .await
             .send_message_to(addr, serialized_handshake_message)
             .await?;
-        println!("Sent a message to {addr:?}");
+        info!("Sent a message to {addr:?}");
         Ok(())
     }
 
     pub async fn start_event_loop(&self) {
         let event_rx = self.event_rx.clone();
         info!("Starting event loop for node");
-        while let Some((peer, message)) = event_rx.write().await.recv().await {
-            match message {
-                Message::Handshake { .. } => {
-                    // Just log it, we are not going to process it here.
-                    // Comms module takes care of the replying since it is a protocol level message.
-                    info!("Received a Handshake from Peer {peer:?}!");
+        let _handle = tokio::spawn(async move {
+            while let Some((peer, message)) = event_rx.write().await.recv().await {
+                match message {
+                    Message::Handshake { .. } => {
+                        // Just log it, we are not going to process it here.
+                        // Comms module takes care of the replying since it is a protocol level message.
+                        info!("Received a Handshake from Peer {peer:?}!");
+                    }
+                    Message::Ping { .. } => {
+                        info!("Received a Ping from Casper: {message:?}");
+                        info!("Not going to send a Pong!");
+                    }
+                    _ => info!("Received a different message {message:?}!"),
                 }
-                Message::Ping { .. } => {
-                    info!("Received a Ping from Casper: {message:?}");
-                    info!("Not going to send a Pong!");
-                }
-                _ => info!("Received a different message {message:?}!"),
             }
-        }
+        });
     }
 }
