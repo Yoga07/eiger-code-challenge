@@ -1,14 +1,13 @@
 // TODO - remove once schemars stops causing warning.
 #![allow(clippy::field_reassign_with_default)]
 
-use std::{collections::BTreeMap, str::FromStr};
+use std::str::FromStr;
 
 use datasize::DataSize;
 use serde::{Deserialize, Serialize};
 
 use casper_types::{
-    bytesrepr::{self, FromBytes, ToBytes},
-    Key, ProtocolVersion, StoredValue,
+    bytesrepr::{self, FromBytes, ToBytes}, ProtocolVersion
 };
 
 use super::{ActivationPoint, GlobalStateUpdate};
@@ -27,30 +26,6 @@ pub struct ProtocolConfig {
     /// Any arbitrary updates we might want to make to the global state at the start of the era
     /// specified in the activation point.
     pub global_state_update: Option<GlobalStateUpdate>,
-}
-
-impl ProtocolConfig {
-    /// The mapping of [`Key`]s to [`StoredValue`]s we will use to update global storage in the
-    /// event of an emergency update.
-    pub(crate) fn get_update_mapping(
-        &self,
-    ) -> Result<BTreeMap<Key, StoredValue>, bytesrepr::Error> {
-        let state_update = match &self.global_state_update {
-            Some(GlobalStateUpdate { entries, .. }) => entries,
-            None => return Ok(BTreeMap::default()),
-        };
-        let mut update_mapping = BTreeMap::new();
-        for (key, stored_value_bytes) in state_update {
-            let stored_value = bytesrepr::deserialize(stored_value_bytes.clone().into())?;
-            update_mapping.insert(*key, stored_value);
-        }
-        Ok(update_mapping)
-    }
-
-    /// Checks whether the values set in the config make sense and returns `false` if they don't.
-    pub(super) fn is_valid(&self) -> bool {
-        true
-    }
 }
 
 impl ToBytes for ProtocolConfig {

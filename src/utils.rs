@@ -1,5 +1,5 @@
 use datasize::DataSize;
-use openssl::hash::{DigestBytes, MessageDigest};
+use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
 use openssl::sha;
 use serde::{Deserialize, Serialize};
@@ -37,22 +37,6 @@ impl Sha512 {
 
         debug_assert_eq!(bs.len(), Self::SIZE);
         bs
-    }
-
-    /// Converts an OpenSSL digest into an `Sha512`.
-    fn from_openssl_digest(digest: &DigestBytes) -> Self {
-        let digest_bytes = digest.as_ref();
-
-        debug_assert_eq!(
-            digest_bytes.len(),
-            Self::SIZE,
-            "digest is not the right size - check constants in `tls.rs`"
-        );
-
-        let mut buf = [0; Self::SIZE];
-        buf.copy_from_slice(&digest_bytes[0..Self::SIZE]);
-
-        Sha512(buf)
     }
 
     /// Returns a new OpenSSL `MessageDigest` set to SHA-512.

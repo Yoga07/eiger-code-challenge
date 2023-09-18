@@ -7,13 +7,12 @@ use std::collections::btree_map::BTreeMap;
 
 use crate::casper_types::message::{Message, Payload};
 use crate::casper_types::ser_deser::MessagePackFormat;
-use crate::casper_types::Nonce;
 use crate::comms::error::{SslResult, TLSError};
 use crate::comms::message::CommsMessage;
 use crate::comms::tls_utils::{
     set_context_options, validate_self_signed_cert, with_generated_certs, Identity,
 };
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use casper_hashing::Digest;
 use casper_types::ProtocolVersion;
 use futures::{SinkExt, StreamExt};
@@ -23,10 +22,10 @@ use openssl::x509::X509Ref;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_openssl::SslStream;
 use tokio_serde::{Deserializer, Serializer};
@@ -36,7 +35,7 @@ use tracing::{error, info, trace};
 /// Channel bounds
 pub(crate) const CHANNEL_SIZE: usize = 10_000;
 
-pub(crate) const IDLE_TIMEOUT: usize = 60 * 60 * 1_000; // 3600s
+pub const MAX_FRAME_LEN: usize = 25165824; // 25 MB as Bytes
 
 pub type FramedTransport = tokio_util::codec::Framed<SslStream<TcpStream>, LengthDelimitedCodec>;
 
@@ -45,6 +44,8 @@ pub struct Comms {
     tcp_ep: Arc<Mutex<TcpListener>>,
     identity: Identity,
     connection_pool: Arc<Mutex<BTreeMap<SocketAddr, FramedTransport>>>,
+    endpoint_listener_handle: Option<JoinHandle<()>>,
+    conn_pool_listener_handle: Option<JoinHandle<()>>,
 }
 
 impl Comms {
@@ -54,8 +55,7 @@ impl Comms {
         chainspec_hash: Digest,
     ) -> Result<Self, CommsError> {
         println!("[{addr:?}] Starting std::tcp listener");
-        let listener = std::net::TcpListener::bind(addr)
-            .map_err(|error| CommsError::ListenerCreation(error))?;
+        let listener = std::net::TcpListener::bind(addr).map_err(CommsError::ListenerCreation)?;
 
         // We must set non-blocking to `true` or else the tokio task hangs forever.
         listener
@@ -66,20 +66,24 @@ impl Comms {
         let tcp_ep = TcpListener::from_std(listener).map_err(|_| CommsError::ListenerConversion)?;
         let new_identity = with_generated_certs()?;
 
-        let comms = Comms {
+        let mut comms = Comms {
             our_address: addr,
             connection_pool: Arc::new(Mutex::new(BTreeMap::new())),
             tcp_ep: Arc::new(Mutex::new(tcp_ep)),
             identity: new_identity,
+            endpoint_listener_handle: None,
+            conn_pool_listener_handle: None,
         };
 
         println!("[{addr:?}] Created comms!");
 
-        comms.listen_on_endpoint().await;
-
-        comms
+        let endpoint_listener_handle = comms.listen_on_endpoint().await;
+        let conn_pool_listener_handle = comms
             .listen_to_connection_pool(event_tx, chainspec_hash)
             .await;
+
+        comms.endpoint_listener_handle = Some(endpoint_listener_handle);
+        comms.conn_pool_listener_handle = Some(conn_pool_listener_handle);
 
         Ok(comms)
     }
@@ -92,7 +96,7 @@ impl Comms {
         println!("Connecting to Peer {peer_addr:?}");
         let stream = TcpStream::connect(peer_addr)
             .await
-            .map_err(|e| TLSError::TcpConnection(e))?;
+            .map_err(TLSError::TcpConnection)?;
 
         stream.set_nodelay(true).map_err(|_| TLSError::TcpNoDelay)?;
 
@@ -120,14 +124,14 @@ impl Comms {
         let framed_transport = tokio_util::codec::Framed::new(
             transport,
             LengthDelimitedCodec::builder()
-                .max_frame_length(25165824 as usize)
+                .max_frame_length(MAX_FRAME_LEN)
                 .new_codec(),
         );
 
         self.connection_pool
             .lock()
             .await
-            .insert(peer_addr.clone(), framed_transport);
+            .insert(*peer_addr, framed_transport);
         Ok(())
     }
     /// Creates a TLS acceptor for a client.
@@ -160,16 +164,13 @@ impl Comms {
         Ok(builder.build())
     }
 
-    pub async fn listen_on_endpoint(&self) {
+    pub async fn listen_on_endpoint(&self) -> JoinHandle<()> {
         let connection_pool = self.connection_pool.clone();
         let identity = self.identity.clone();
         let tcp_ep = self.tcp_ep.clone();
         trace!("Starting to listen!");
-        println!("Starting to listen!");
-        let _handle = tokio::spawn(async move {
-            println!("Started ep listener thread");
+        tokio::spawn(async move {
             while let Ok((stream, peer_addr)) = tcp_ep.lock().await.accept().await {
-                println!("New connection received!");
                 trace!("New connection received!");
 
                 let mut transport: SslStream<TcpStream> = match Self::create_tls_acceptor(
@@ -182,7 +183,6 @@ impl Comms {
                 {
                     Ok(stream) => stream,
                     Err(e) => {
-                        println!("Error accepting connection at endpoint {e:?}");
                         error!("Error accepting connection at endpoint {e:?}");
                         continue;
                     }
@@ -193,7 +193,6 @@ impl Comms {
                     .map_err(|e| CommsError::Tls(TLSError::TlsHandshake(e.to_string())))
                 {
                     error!("Error accepting connection at endpoint {e:?}");
-                    println!("Error accepting connection at endpoint {e:?}");
                     continue;
                 }
 
@@ -214,7 +213,6 @@ impl Comms {
                     Ok(peer_cert) => peer_cert,
                     Err(e) => {
                         error!("Error accepting connection at endpoint {e:?}");
-                        println!("Error accepting connection at endpoint {e:?}");
                         continue;
                     }
                 };
@@ -223,7 +221,7 @@ impl Comms {
                 let framed_transport = tokio_util::codec::Framed::new(
                     transport,
                     LengthDelimitedCodec::builder()
-                        .max_frame_length(25165824 as usize)
+                        .max_frame_length(MAX_FRAME_LEN)
                         .new_codec(),
                 );
 
@@ -235,41 +233,24 @@ impl Comms {
                 trace!("Inserted new conn!");
                 println!("Inserted new conn!");
             }
-        });
+        })
     }
 
     pub async fn listen_to_connection_pool<P: Payload>(
         &self,
         event_tx: Sender<(SocketAddr, Message<P>)>,
         chainspec_hash: Digest,
-    ) {
+    ) -> JoinHandle<()> {
         println!("Starting conn pool listener thread");
         let our_addr = self.our_address();
         let all_receivers = self.connection_pool.clone();
-        let _handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             loop {
                 for (addr, stream) in all_receivers.lock().await.iter_mut() {
-                    // let (mut reader, mut writer) = tokio::io::split(stream);
-
                     let (mut writer, mut reader) = stream.split();
-                    // Create a buffer to read incoming data
-                    // let mut buffer = [0u8; 1024 * 1024]; // 1 MB buffer
                     if let Ok(Some(msg)) = timeout(Duration::from_millis(1), reader.next()).await {
                         match msg {
                             Ok(bytes_read) => {
-                                // if bytes_read == 0 {
-                                //     // The client has disconnected
-                                //     println!("Peer {addr:?} has disconnected.");
-                                //     println!("Removing them from connection pool.");
-                                //
-                                //     // Remove them from our conn pool
-                                //     let _ = all_receivers.lock().await.remove(addr);
-                                // }
-
-                                // Handle the data received from the client
-                                // let data = &buffer[4..bytes_read]; // remove appended data
-                                // let bytes = BytesMut::from(data);
-
                                 println!("Data from Casper {bytes_read:?}");
 
                                 let mut encoder = MessagePackFormat;
@@ -287,7 +268,7 @@ impl Comms {
                                 };
 
                                 // Notify the event loop
-                                let _ = event_tx.send((addr.clone(), remote_message.clone())).await;
+                                let _ = event_tx.send((*addr, remote_message.clone())).await;
 
                                 // Send back a handshake message
                                 let hs: Message<P> = Message::Handshake {
@@ -298,8 +279,6 @@ impl Comms {
                                     is_syncing: false,
                                     chainspec_hash: Some(chainspec_hash),
                                 };
-
-                                // let ping: Message<P> = Message::Ping { nonce: Nonce::new(5 as u64) };
 
                                 match Pin::new(&mut encoder)
                                     .serialize(&Arc::new(hs))
@@ -331,7 +310,7 @@ impl Comms {
                     sleep(Duration::from_millis(5)).await;
                 }
             }
-        });
+        })
     }
 
     pub async fn send_message_to(

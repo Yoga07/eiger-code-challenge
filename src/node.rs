@@ -3,18 +3,13 @@ use crate::casper_types::message::{Message, Payload};
 use crate::casper_types::ser_deser::MessagePackFormat;
 use crate::comms::{Comms, CHANNEL_SIZE};
 use crate::error::{Error, Result};
-use bincode::serialize;
-use bytes::Bytes;
-use casper_types::{ProtocolVersion, SemVer};
+use casper_types::ProtocolVersion;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::WriteHalf;
-use tokio::net::TcpStream;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{channel, Receiver};
 use tokio::sync::RwLock;
-use tokio_openssl::SslStream;
 use tokio_serde::Serializer;
 use tracing::info;
 // use tracing::error;
@@ -22,40 +17,29 @@ use tracing::info;
 #[derive(Clone)]
 pub struct Node {
     addr: SocketAddr,
-    bootstrap_nodes: Vec<SocketAddr>,
-    // pub(crate) handshake_handler: Arc<RwLock<HandshakeHandler>>,
     comms: Arc<RwLock<Comms>>,
-    pub(crate) event_tx: Sender<(SocketAddr, Message<Vec<u8>>)>,
+    #[allow(clippy::type_complexity)]
     event_rx: Arc<RwLock<Receiver<(SocketAddr, Message<Vec<u8>>)>>>,
-    chainspec: Chainspec,
 }
 
 impl Payload for Vec<u8> {}
 
 impl Node {
-    pub async fn new(our_addr: SocketAddr, bootstrap_nodes: Vec<SocketAddr>) -> Result<Self> {
+    pub async fn new(our_addr: SocketAddr) -> Result<Self> {
         let (event_tx, event_rx) = channel(CHANNEL_SIZE);
 
         let chainspec = Chainspec::from_path(PathBuf::from("chainspec.toml"))?;
 
-        let comms = Comms::new_node(our_addr, event_tx.clone(), chainspec.hash())
+        let comms = Comms::new_node(our_addr, event_tx, chainspec.hash())
             .await
             .map_err(Error::Comms)?;
 
         info!("Started node at {:?}", comms.our_address());
 
-        for node_addr in &bootstrap_nodes {
-            comms.connect_to(node_addr).await?;
-        }
-
         let node = Node {
             addr: our_addr,
-            bootstrap_nodes,
-            // handshake_handler: Arc::new(RwLock::new(hs_handler)),
             comms: Arc::new(RwLock::new(comms)),
-            event_tx,
             event_rx: Arc::new(RwLock::new(event_rx)),
-            chainspec,
         };
 
         Ok(node)
@@ -100,29 +84,14 @@ impl Node {
     }
 
     pub async fn start_event_loop(&self) {
-        // let node = self.clone();
         let event_rx = self.event_rx.clone();
-        let _handle = tokio::spawn(async move {
-            while let Some((peer, message)) = event_rx.write().await.recv().await {
-                match message {
-                    Message::Handshake { chainspec_hash, .. } => {
-                        println!("Received a Handshake!");
-                        println!("Chainspec_hash {chainspec_hash:?}");
-                    }
-                    _ => println!("Received a different message {message:?}"),
-                    // Event::LocalEvent(local_msg) => {
-                    //     if let Err(e) = node.handle_local_event(local_msg).await {
-                    //         println!("Error handling local event {e:?}");
-                    //     }
-                    // }
+        while let Some((peer, message)) = event_rx.write().await.recv().await {
+            match message {
+                Message::Handshake { .. } => {
+                    info!("Received a Handshake from Peer {peer:?}!");
                 }
+                _ => info!("Received a different message {message:?}"),
             }
-        });
+        }
     }
-
-    // pub async fn handle_local_event(&self, event: LocalEvent) -> Result<()> {
-    //     match event {
-    //         LocalEvent::SendEventTo(peer, event) => self.send_event_to(peer, *event).await,
-    //     }
-    // }
 }

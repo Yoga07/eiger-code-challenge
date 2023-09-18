@@ -7,8 +7,6 @@ use casper_types::{
     system::auction::DelegationRate,
     Motes,
 };
-#[cfg(test)]
-use casper_types::{testing::TestRng, U512};
 
 /// Validator account configuration.
 #[derive(PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize, DataSize, Debug, Copy, Clone)]

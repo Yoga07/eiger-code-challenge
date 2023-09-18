@@ -1,8 +1,6 @@
-pub mod bincode_format;
 pub mod chainspec;
 pub mod crypto;
 pub mod message;
-pub mod protocol_version;
 pub mod ser_deser;
 
 use datasize::DataSize;

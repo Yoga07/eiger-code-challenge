@@ -117,9 +117,6 @@ impl FromBytes for WasmConfig {
     }
 }
 
-/// Support for Wasm opcode costs.
-use std::{convert::TryInto, num::NonZeroU32};
-
 /// Default cost of the `bit` Wasm opcode.
 pub const DEFAULT_BIT_COST: u32 = 300;
 /// Default cost of the `add` Wasm opcode.
@@ -708,11 +705,6 @@ const DEFAULT_WRITE_VALUE_SIZE_WEIGHT: u32 = 980;
 const DEFAULT_DICTIONARY_PUT_COST: u32 = 9_500;
 const DEFAULT_DICTIONARY_PUT_KEY_BYTES_SIZE_WEIGHT: u32 = 1_800;
 const DEFAULT_DICTIONARY_PUT_VALUE_SIZE_WEIGHT: u32 = 520;
-
-const DEFAULT_NEW_DICTIONARY_COST: u32 = DEFAULT_NEW_UREF_COST;
-
-pub(crate) const DEFAULT_HOST_FUNCTION_NEW_DICTIONARY: HostFunction<[Cost; 1]> =
-    HostFunction::new(DEFAULT_NEW_DICTIONARY_COST, [NOT_USED]);
 
 /// Representation of a host function cost.
 ///

@@ -6,8 +6,6 @@ use std::fmt::{self, Display, Formatter};
 use datasize::DataSize;
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-use casper_types::testing::TestRng;
 use casper_types::{
     bytesrepr::{self, FromBytes, ToBytes, U8_SERIALIZED_LENGTH},
     EraId, Timestamp,
@@ -24,33 +22,6 @@ pub enum ActivationPoint {
     EraId(EraId),
     /// Genesis timestamp.
     Genesis(Timestamp),
-}
-
-impl ActivationPoint {
-    /// Returns whether we should upgrade the node due to the next era being the upgrade activation
-    /// point.
-    pub(crate) fn should_upgrade(&self, era_being_deactivated: &EraId) -> bool {
-        match self {
-            ActivationPoint::EraId(era_id) => era_being_deactivated.successor() >= *era_id,
-            ActivationPoint::Genesis(_) => false,
-        }
-    }
-
-    /// Returns the Era ID if `self` is of `EraId` variant, or else 0 if `Genesis`.
-    pub(crate) fn era_id(&self) -> EraId {
-        match self {
-            ActivationPoint::EraId(era_id) => *era_id,
-            ActivationPoint::Genesis(_) => EraId::from(0),
-        }
-    }
-
-    /// Returns the timestamp if `self` is of `Genesis` variant, or else `None`.
-    pub(crate) fn genesis_timestamp(&self) -> Option<Timestamp> {
-        match self {
-            ActivationPoint::EraId(_) => None,
-            ActivationPoint::Genesis(timestamp) => Some(*timestamp),
-        }
-    }
 }
 
 impl Display for ActivationPoint {

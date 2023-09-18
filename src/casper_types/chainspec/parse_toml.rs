@@ -10,7 +10,7 @@ use std::{convert::TryFrom, path::Path};
 
 use crate::casper_types::chainspec::system_config::SystemConfig;
 use crate::casper_types::chainspec::wasm_config::WasmConfig;
-use casper_types::{bytesrepr::Bytes, file_utils, ProtocolVersion};
+use casper_types::{file_utils, ProtocolVersion};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -100,11 +100,10 @@ pub(super) fn parse_toml<P: AsRef<Path>>(chainspec_path: P) -> Result<Chainspec,
     };
 
     // global_state_update.toml must live in the same directory as chainspec.toml.
-    let (global_state_update, maybe_global_state_bytes) =
-        match GlobalStateUpdateConfig::from_dir(root)? {
-            Some((config, bytes)) => (Some(GlobalStateUpdate::try_from(config)?), Some(bytes)),
-            None => (None, None),
-        };
+    let (global_state_update, _) = match GlobalStateUpdateConfig::from_dir(root)? {
+        Some((config, bytes)) => (Some(GlobalStateUpdate::try_from(config)?), Some(bytes)),
+        None => (None, None),
+    };
 
     let protocol_config = ProtocolConfig {
         version: toml_chainspec.protocol.version,

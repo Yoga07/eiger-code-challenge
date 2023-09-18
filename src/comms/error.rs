@@ -1,15 +1,9 @@
 use openssl::error::ErrorStack;
-use rustls::CertificateError;
 use std::io;
 
 #[derive(Debug)]
 pub enum CommsError {
-    HeaderRead(String),
-    PayloadEmpty,
     PeerNotFound,
-    NotEnoughBytes,
-    CertifcateError(String),
-    Certificate(CertificateError),
     MessageTooLarge(usize),
     SendFailed(String),
     RecvFailed(String),

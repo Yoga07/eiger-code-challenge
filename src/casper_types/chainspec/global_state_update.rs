@@ -1,12 +1,8 @@
 use std::{collections::BTreeMap, convert::TryFrom, path::Path};
 
 use datasize::DataSize;
-#[cfg(test)]
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-use casper_types::testing::TestRng;
 use casper_types::{
     bytesrepr::{self, Bytes, FromBytes, ToBytes},
     file_utils, AsymmetricType, Key, PublicKey, U512,
@@ -134,41 +130,5 @@ impl TryFrom<GlobalStateUpdateConfig> for GlobalStateUpdate {
             validators,
             entries,
         })
-    }
-}
-
-#[cfg(test)]
-impl GlobalStateUpdate {
-    pub fn random(rng: &mut TestRng) -> Self {
-        let mut validators = BTreeMap::new();
-        if rng.gen() {
-            let count = rng.gen_range(5..10);
-            for _ in 0..count {
-                validators.insert(PublicKey::random(rng), rng.gen::<U512>());
-            }
-        }
-
-        let count = rng.gen_range(0..10);
-        let mut entries = BTreeMap::new();
-        for _ in 0..count {
-            entries.insert(rng.gen(), rng.gen());
-        }
-
-        Self {
-            validators: Some(validators),
-            entries,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn global_state_update_bytesrepr_roundtrip() {
-        let mut rng = crate::new_rng();
-        let update = GlobalStateUpdate::random(&mut rng);
-        bytesrepr::test_serialization_roundtrip(&update);
     }
 }

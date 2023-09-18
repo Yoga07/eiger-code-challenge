@@ -4,7 +4,7 @@ use casper_hashing::Digest;
 use casper_types::ProtocolVersion;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use strum::EnumDiscriminants;
 

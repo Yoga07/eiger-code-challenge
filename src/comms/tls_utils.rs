@@ -93,9 +93,6 @@ fn generate_cert(private_key: &PKey<Private>, cn: &str) -> SslResult<X509> {
     Ok(cert)
 }
 
-/// Sets common options of both acceptor and connector on TLS context.
-///
-/// Used internally to set various TLS parameters.
 pub fn set_context_options(
     ctx: &mut SslContextBuilder,
     cert: &X509Ref,
@@ -107,23 +104,14 @@ pub fn set_context_options(
     ctx.set_private_key(private_key)?;
     ctx.check_private_key()?;
 
-    // Note that this does not seem to work as one might naively expect; the client can still send
-    // no certificate and there will be no error from OpenSSL. For this reason, we pass set `PEER`
-    // (causing the request of a cert), but pass all of them through and verify them after the
-    // handshake has completed.
     ctx.set_verify_callback(SslVerifyMode::PEER, |_, _| true);
 
     Ok(())
 }
 
-/// Checks that the cryptographic parameters on a certificate are correct and returns the
-/// fingerprint of the public key.
-///
-/// At the very least this ensures that no weaker ciphers have been used to forge a certificate.
+// Ensures that no weaker ciphers have been used to forge a certificate.
 pub(crate) fn validate_self_signed_cert(cert: X509) -> Result<X509, TLSError> {
     if cert.signature_algorithm().object().nid() != SIGNATURE_ALGORITHM {
-        // The signature algorithm is not of the exact kind we are using to generate our
-        // certificates, an attacker could have used a weaker one to generate colliding keys.
         return Err(TLSError::WrongSignatureAlgorithm);
     }
 

@@ -14,16 +14,16 @@ mod protocol_config;
 mod system_config;
 mod wasm_config;
 
-use std::{fmt::Debug, path::Path, sync::Arc};
+use std::{fmt::Debug, path::Path};
 
 use datasize::DataSize;
 use serde::Serialize;
-use tracing::{error, info, warn};
+use tracing::error;
 
 use casper_hashing::Digest;
 use casper_types::{
     bytesrepr::{self, FromBytes, ToBytes},
-    EraId, ProtocolVersion,
+    ProtocolVersion,
 };
 
 pub use self::{
@@ -43,11 +43,7 @@ use crate::casper_types::chainspec::Error as ChainspecError;
 /// The name of the chainspec file on disk.
 pub const CHAINSPEC_FILENAME: &str = "chainspec.toml";
 
-// Additional overhead accounted for (eg. lower level networking packet encapsulation).
-const CHAINSPEC_NETWORK_MESSAGE_SAFETY_MARGIN: usize = 256;
-
-/// A collection of configuration settings describing the state of the system at genesis and after
-/// upgrades to basic system functionality occurring after genesis.
+/// A collection of configuration settings
 #[derive(DataSize, PartialEq, Eq, Serialize, Debug, Clone)]
 pub struct Chainspec {
     /// Protocol config.
