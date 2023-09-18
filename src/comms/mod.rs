@@ -6,6 +6,7 @@ pub use error::CommsError;
 use std::collections::btree_map::BTreeMap;
 use std::io;
 
+use crate::casper_types::bincode_format::BincodeFormat;
 use crate::casper_types::chainspec::Chainspec;
 use crate::casper_types::message::{Message, Payload};
 use crate::casper_types::ser_deser::MessagePackFormat;
@@ -30,7 +31,7 @@ use tokio::time::{interval, timeout, Duration};
 use tokio_openssl::SslStream;
 use tokio_serde::{Deserializer, Serializer};
 use tokio_util::codec::LengthDelimitedCodec;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 /// Channel bounds
 pub(crate) const CHANNEL_SIZE: usize = 10_000;
@@ -298,7 +299,6 @@ impl Comms {
                                                         error!(
                                                             "Error sending data to CASPER!: {e:?}"
                                                         );
-                                                        continue;
                                                     }
                                                 }
                                                 Err(e) => {
@@ -313,9 +313,25 @@ impl Comms {
                                         }
                                     }
                                 } else {
-                                    info!("Ignoring post-handshake traffic which is encoded in a different format");
-                                    info!("HandShake success!");
-                                    println!("Ignoring post-handshake traffic which is encoded in a different format");
+                                    // NOTE: This block is just done for demonstration purpose
+                                    // This proves that the serialization format has changed since handshake was a success.
+                                    trace!("BYTES FROM CASPER {bytes_read:?}");
+
+                                    let mut bincode_fmt = BincodeFormat::default();
+
+                                    let _: Message<P> = match Pin::new(&mut bincode_fmt)
+                                        .deserialize(&bytes_read)
+                                    {
+                                        Ok(message) => {
+                                            let _ = event_tx.send((*addr, message.clone())).await;
+                                            message
+                                        }
+                                        Err(e) => {
+                                            warn!("Error deserializing {e:?}");
+                                            warn!("Received an internal message from Casper. Ignoring the deserialization error");
+                                            continue;
+                                        }
+                                    };
                                 }
                             }
                             Err(e) => {

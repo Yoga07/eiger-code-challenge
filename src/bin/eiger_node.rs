@@ -4,7 +4,8 @@ use std::str::FromStr;
 
 #[tokio::main]
 async fn main() {
-    let our_address = SocketAddr::from_str("127.0.0.1:5001").unwrap();
+    let our_address = SocketAddr::from_str("127.0.0.1:5001")
+        .expect("Error parsing string as std::net::SocketAddr");
 
     match Node::new(our_address).await {
         Ok(node) => {

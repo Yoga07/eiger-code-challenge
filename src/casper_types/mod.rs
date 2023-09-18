@@ -1,3 +1,4 @@
+pub mod bincode_format;
 pub mod chainspec;
 pub mod crypto;
 pub mod message;

@@ -104,7 +104,11 @@ impl Node {
                     // Comms module takes care of the replying since it is a protocol level message.
                     info!("Received a Handshake from Peer {peer:?}!");
                 }
-                _ => info!("Received a different message {message:?}"),
+                Message::Ping { .. } => {
+                    info!("Received a Ping from Casper: {message:?}");
+                    info!("Not going to send a Pong!");
+                }
+                _ => info!("Received a different message {message:?}!"),
             }
         }
     }
