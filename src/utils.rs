@@ -83,8 +83,8 @@ impl Debug for Sha512 {
 pub fn setup_logging(to_file: bool) {
     // Configure the tracing subscriber with a filter.
     let filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("info"))
-        .expect("Failed to create filter from default env or 'info' filter.");
+        .or_else(|_| EnvFilter::try_new("trace"))
+        .expect("Failed to create filter from default env or 'trace' filter.");
 
     // Create a custom subscriber that logs to the file.
     let subscriber_builder = FmtSubscriber::builder().with_env_filter(filter);

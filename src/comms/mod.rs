@@ -114,10 +114,9 @@ impl Comms {
             .ssl()
             .peer_certificate()
             .ok_or(TLSError::NoPeerCertificate)?;
-
         //
         // // We'll validate them just as Casper does to maintain integrity
-        // let _validated_peer_cert = validate_self_signed_cert(peer_cert)?;
+        let _validated_peer_cert = validate_self_signed_cert(peer_cert)?;
 
         info!("Validated Peer Cert");
         // Frame the transport
@@ -286,6 +285,9 @@ impl Comms {
                                                 chainspec_hash: Some(chainspec.hash()),
                                             };
 
+                                            info!("Sending Handshake to Casper");
+                                            trace!("{hs:?}");
+
                                             // Serialize our handshake
                                             match Pin::new(&mut encoder)
                                                 .serialize(&Arc::new(hs))
@@ -295,10 +297,9 @@ impl Comms {
                                                     )
                                                 }) {
                                                 Ok(bytes) => {
-                                                    trace!("BYTES TO BE SENT TO CASPER {bytes:?}");
                                                     if let Err(e) = writer.send(bytes).await {
                                                         error!(
-                                                            "Error sending data to CASPER!: {e:?}"
+                                                            "Error sending handshake to CASPER!: {e:?}"
                                                         );
                                                     }
                                                 }

@@ -1,25 +1,57 @@
+use clap::{App, Arg};
 use eiger_code_challenge::node::Node;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Duration;
-use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() {
-    let our_address = SocketAddr::from_str("127.0.0.1:5001")
+    // Define the command-line interface
+    let matches = App::new("Eiger Handshake Node")
+        .author("Yogesh")
+        .about("A simple Rust program with performs Handshakes with Casper P2P nodes")
+        .arg(
+            Arg::with_name("our_address")
+                .help("SocketAddress for this to node to bind to.")
+                .short("addr")
+                .long("our_address")
+                .value_name("SOCKET_ADDR")
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("chainspec_path")
+                .help("Path to chainspec.toml file")
+                .short("c")
+                .long("chainspec")
+                .value_name("PATH")
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("log_to_file")
+                .help("Writes logs to a file on a rolling basis")
+                .short("l")
+                .long("log_to_file")
+                .takes_value(false),
+        )
+        .get_matches();
+
+    // Access and process the command-line arguments
+    let our_address_str = matches
+        .value_of("our_address")
+        .expect("SocketAddress for the node was not passed");
+    let chainspec_path = matches
+        .value_of("chainspec_path")
+        .expect("Path to chainspec.toml was not provided");
+    let log_to_file = matches.is_present("log_to_file");
+
+    let our_address = SocketAddr::from_str(our_address_str)
         .expect("Error parsing string as std::net::SocketAddr");
 
-    let peer_address = SocketAddr::from_str("127.0.0.1:34553")
-        .expect("Error parsing string as std::net::SocketAddr");
-
-    match Node::new(our_address).await {
+    match Node::new(our_address, PathBuf::from(chainspec_path), log_to_file).await {
         Ok(node) => {
             node.start_event_loop().await;
-            node.connect_to(peer_address).await.unwrap();
-            node.send_handshake_to::<Vec<u8>>(peer_address).await.unwrap();
-            loop {
-                sleep(Duration::from_secs(1)).await;
-            }
         }
         Err(e) => {
             println!("Error starting node {e:?}");
