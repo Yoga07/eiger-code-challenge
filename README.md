@@ -23,18 +23,11 @@ Pick a publicly available P2P node (e.g. a blockchain one) implementation - whic
 
 Casper - https://github.com/casper-network/casper-node
 
-#### Reasons:
-
-- A novel P2P implementation that satifies the requirements(non-bitcoin) of this challenge.
-- Has a robust and well-written networking mechanism that makes this challenge a even more interesting to solve.
-- Employs multiple specially tailored serialization formats for it's messages.
-- Well established handshake flows that separates Protocol payload from Network payload using the above mentioned serialization formats.
-
 ### Download binaries:
 
-You can download the handshake binary and the casper-node binary from [provide link].
+You can download the handshake binary and the casper-node binary and their related files from [the release page](https://github.com/Yoga07/eiger-code-challenge/releases/tag/v1.0.0).
 
-### Building from source:
+### Building binaries from source:
 
 To build the Handshake binary from source:
 
@@ -48,14 +41,14 @@ git clone https://github.com/Yoga07/eiger-code-challenge
 cargo build --release
 ```
 
-### Running the binary:
+### Executing the binary:
 
 - Run the eiger_node binary with:
 ```
-target/release/eiger_node --our_address="127.0.0.1:5001" --chainspec="./resources/chainspec.toml"
+target/release/eiger_node --our_address="127.0.0.1:5001" --chainspec="./resources/chainspec.toml" -l
 ```
 
-Command line arguments:
+- Command line arguments:
 ```
 USAGE:
     eiger_node [FLAGS] [OPTIONS] --chainspec <PATH> --our_address <SOCKET_ADDR>
@@ -84,7 +77,8 @@ For ease of use, we'll be defaulting to two IPs for the casper node and the hand
 
 Since the handshake node can handle bi-directional requests, there are two ways to test the handshake process.
 
-### To run as the initiator
+To run as the initiator
+--------------
 
 - Step 1: Casper requires to be run on loopback to accept incoming connections, therefore we need to set the `known_address` field to it's own IP in the `config.toml` file
 
@@ -103,7 +97,8 @@ sudo RUST_LOG=trace resources/casper-node validator resources/config.toml > casp
 target/release/eiger_node --our_address="127.0.0.1:5001" --chainspec="./resources/chainspec.toml" --peer_address="127.0.0.1:34553" -l
 ```
 
-### To run as the listener
+To run as the listener
+--------------
 
 - Step 1: Casper requires an IP to reach out to, therefore we need to set the `known_address` field to the handshake node's IP in the `config.toml` file.
 
@@ -122,7 +117,8 @@ target/release/eiger_node --our_address="127.0.0.1:5001" --chainspec="./resource
 sudo RUST_LOG=trace resources/casper-node validator resources/config.toml > casper.log
 ```
 
-### Success scenarios
+Success scenarios
+--------------
 
 Casper's logs will be written in the `casper.log` file and the Handshake node's logs will be written to `eiger_node.log.<DATE>`.
 We can monitor the logs to see the handshake mechanism. A successful handshake received at handshake node will be logged as
@@ -146,4 +142,19 @@ We can see those warnings of deserialization getting logged as:
 ```
 2023-09-19T09:37:09.424731Z  WARN eiger_code_challenge::comms: Error deserializing Custom { kind: InvalidData, error: Custom("Slice had bytes remaining after deserialization") }
 2023-09-19T09:37:09.424741Z  WARN eiger_code_challenge::comms: Received an internal message from Casper. Ignoring the deserialization error
+```
+---
+#### Helper commands:
+- To generate ed25519 keys for Casper
+```
+openssl genpkey -algorithm ed25519 -out example_secret_key.pem
+openssl pkey -pubout -in example_secret_key.pem -out example_public_key.pem
+```
+- Clear logs from both the binaries
+```
+sudo rm -rf *.log.*
+```
+- To kill processes of casper if there is any pre-use of ports
+```
+killall casper-node
 ```
