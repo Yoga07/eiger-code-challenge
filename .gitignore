@@ -17,4 +17,5 @@ Cargo.lock
 
 # Casper files
 casper.log
+eiger_node.log.*
 node-storage/

@@ -270,10 +270,46 @@ impl Comms {
                                     Pin::new(&mut encoder).deserialize(&bytes_read);
 
                                 if let Ok(msg) = remote_message {
-                                    match msg {
-                                        Message::Handshake { .. } => {
+                                    match &msg {
+                                        Message::Handshake {
+                                            network_name,
+                                            protocol_version,
+                                            chainspec_hash,
+                                            ..
+                                        } => {
+                                            // Check if the handshake is from the correct network
+                                            if network_name != &chainspec.network_config.name {
+                                                error!("Network name in handshake did not match our network");
+                                                continue;
+                                            }
+
+                                            // Check if the peer is the correct protocol version
+                                            if protocol_version
+                                                != &chainspec.protocol_config.version
+                                            {
+                                                error!("ProtocolVersion in handshake did not match our protocol version");
+                                                continue;
+                                            }
+
+                                            // Check if the peer has Chainspec config. This should be true because we have
+                                            // a protocol version at this point.
+                                            let peer_chainspec_hash = if let Some(hash) =
+                                                chainspec_hash
+                                            {
+                                                hash
+                                            } else {
+                                                error!("Chainspec hash missing from handshake.");
+                                                continue;
+                                            };
+
+                                            // Check if the peer has the same Chainspec config hash
+                                            if peer_chainspec_hash != &chainspec.hash() {
+                                                error!("Chainspec hash in handshake did not match our chainspec.");
+                                                continue;
+                                            }
+
                                             // Notify the event loop
-                                            let _ = event_tx.send((*addr, msg)).await;
+                                            let _ = event_tx.send((*addr, msg.clone())).await;
 
                                             // Send back a handshake message on the same stream
                                             let hs: Message<P> = Message::Handshake {
