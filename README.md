@@ -69,6 +69,7 @@ OPTIONS:
     -c, --chainspec <PATH>             Path to chainspec.toml file
     -a, --our_address <SOCKET_ADDR>    SocketAddress for this to node to bind to.
 ```
+
 ### Testing Handshake with Casper
 
 Casper's `casper-node` binary(built at their [latest commit](https://github.com/casper-network/casper-node/commit/f7d8228de3cb56a3fe705f5a787d3dbf03ff7998)) is bundled in the `resources` directory for testing purposes. 
@@ -102,5 +103,5 @@ We can see those warnings of deserialization getting logged as:
 2023-09-19T09:37:09.424741Z  WARN eiger_code_challenge::comms: Received an internal message from Casper. Ignoring the deserialization error
 ```
 
-Note: By default, the `eiger_node` binary logs to stdout, but if you write the logs to a file, kindly add ` -l` at the end of line no. 8 which makes the process to write the logs to a file on a rolling basis.
+Note: By default, the `eiger_node` binary logs to a file, but if you write the logs to stdout, kindly remove ` -l` at the end of line no. 11 in `run.sh`.
 
