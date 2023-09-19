@@ -12,7 +12,7 @@ async fn main() {
         .about("A simple Rust program with performs Handshakes with Casper P2P nodes")
         .arg(
             Arg::with_name("our_address")
-                .help("SocketAddress for this to node to bind to.")
+                .help("SocketAddress for this to node to bind to")
                 .short("addr")
                 .long("our_address")
                 .value_name("SOCKET_ADDR")
@@ -35,21 +35,48 @@ async fn main() {
                 .long("log_to_file")
                 .takes_value(false),
         )
+        .arg(
+            Arg::with_name("peer_address")
+                .help("SocketAddress of the peer we'll be connecting to")
+                .short("p")
+                .long("peer_address")
+                .value_name("SOCKET_ADDR")
+                .takes_value(true)
+                .required(false),
+        )
         .get_matches();
 
     // Access and process the command-line arguments
     let our_address_str = matches
         .value_of("our_address")
         .expect("SocketAddress for the node was not passed");
+
+    let mut bootstrap_addrs = vec![];
+
+    if let Some(peer_address_str) = matches.value_of("peer_address") {
+        bootstrap_addrs.push(
+            SocketAddr::from_str(peer_address_str)
+                .expect("Error parsing string as std::net::SocketAddr for peer"),
+        )
+    }
+
     let chainspec_path = matches
         .value_of("chainspec_path")
         .expect("Path to chainspec.toml was not provided");
+
     let log_to_file = matches.is_present("log_to_file");
 
     let our_address = SocketAddr::from_str(our_address_str)
         .expect("Error parsing string as std::net::SocketAddr");
 
-    match Node::new(our_address, PathBuf::from(chainspec_path), log_to_file).await {
+    match Node::new(
+        our_address,
+        bootstrap_addrs,
+        PathBuf::from(chainspec_path),
+        log_to_file,
+    )
+    .await
+    {
         Ok(node) => {
             node.start_event_loop().await;
         }

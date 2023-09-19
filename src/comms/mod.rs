@@ -10,16 +10,20 @@ use crate::casper_types::bincode_format::BincodeFormat;
 use crate::casper_types::chainspec::Chainspec;
 use crate::casper_types::message::{Message, Payload};
 use crate::casper_types::ser_deser::MessagePackFormat;
+use crate::casper_types::Nonce;
 use crate::comms::error::{SslResult, TLSError};
 use crate::comms::message::CommsMessage;
 use crate::comms::tls_utils::{
     set_context_options, validate_self_signed_cert, with_generated_certs, Identity,
 };
 use bytes::Bytes;
+use casper_hashing::Digest;
+use casper_types::ProtocolVersion;
 use futures::{SinkExt, StreamExt};
 use openssl::pkey::{PKeyRef, Private};
 use openssl::ssl::{Ssl, SslAcceptor, SslConnector, SslMethod};
 use openssl::x509::X509Ref;
+use rand::RngCore;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -50,6 +54,8 @@ pub struct Comms {
     identity: Identity,
     chainspec: Chainspec,
     connection_pool: Arc<Mutex<BTreeMap<SocketAddr, FramedTransport>>>,
+    awaiting_hs_reply_from: Arc<Mutex<Vec<SocketAddr>>>,
+    fully_connected_peers: Arc<Mutex<Vec<SocketAddr>>>,
     endpoint_listener_handle: Option<JoinHandle<()>>,
     conn_pool_listener_handle: Option<JoinHandle<()>>,
 }
@@ -68,12 +74,14 @@ impl Comms {
 
         let mut comms = Comms {
             our_address: addr,
-            connection_pool: Arc::new(Mutex::new(BTreeMap::new())),
             tcp_ep: Arc::new(Mutex::new(tcp_ep)),
             identity: new_identity,
+            chainspec,
+            connection_pool: Arc::new(Mutex::new(BTreeMap::new())),
+            awaiting_hs_reply_from: Arc::new(Mutex::new(vec![])),
+            fully_connected_peers: Arc::new(Mutex::new(vec![])),
             endpoint_listener_handle: None,
             conn_pool_listener_handle: None,
-            chainspec,
         };
 
         let endpoint_listener_handle = comms.listen_on_endpoint().await;
@@ -93,14 +101,14 @@ impl Comms {
     }
 
     pub async fn connect_to(&self, peer_addr: &SocketAddr) -> Result<(), CommsError> {
-        println!("Connecting to Peer {peer_addr:?}");
+        info!("Connecting to Peer {peer_addr:?}");
         let stream = TcpStream::connect(peer_addr)
             .await
             .map_err(TLSError::TcpConnection)?;
 
         stream.set_nodelay(true).map_err(|_| TLSError::TcpNoDelay)?;
 
-        let transport =
+        let mut transport =
             Self::create_tls_connector(&self.identity.tls_certificate, &self.identity.secret_key)
                 .and_then(|connector| connector.configure())
                 .and_then(|mut config| {
@@ -109,6 +117,10 @@ impl Comms {
                 })
                 .and_then(|ssl| SslStream::new(ssl, stream))
                 .map_err(|e| TLSError::TlsInitialization(e.to_string()))?;
+
+        SslStream::connect(Pin::new(&mut transport))
+            .await
+            .map_err(|e| TLSError::TlsHandshake(e.to_string()))?;
 
         let peer_cert = transport
             .ssl()
@@ -248,6 +260,8 @@ impl Comms {
         let our_addr = self.our_address();
         let all_receivers = self.connection_pool.clone();
         let chainspec = self.chainspec.clone();
+        let awaiting_reply_from_peers = self.awaiting_hs_reply_from.clone();
+        let fully_connected_peers = self.fully_connected_peers.clone();
         tokio::spawn(async move {
             // Polling interval
             let mut interval = interval(Duration::from_millis(POLLING_RATE));
@@ -256,7 +270,7 @@ impl Comms {
                 // Wait for the polling to happen
                 interval.tick().await;
 
-                for (addr, stream) in all_receivers.lock().await.iter_mut() {
+                for (peer_addr, stream) in all_receivers.lock().await.iter_mut() {
                     // Split into a bi-directional stream
                     let (mut writer, mut reader) = stream.split();
 
@@ -277,39 +291,59 @@ impl Comms {
                                             chainspec_hash,
                                             ..
                                         } => {
-                                            // Check if the handshake is from the correct network
-                                            if network_name != &chainspec.network_config.name {
-                                                error!("Network name in handshake did not match our network");
+                                            if fully_connected_peers
+                                                .lock()
+                                                .await
+                                                .contains(peer_addr)
+                                            {
+                                                info!("Finished handshake to {peer_addr:?}. Ignoring redundant Handshakes");
                                                 continue;
                                             }
 
-                                            // Check if the peer is the correct protocol version
-                                            if protocol_version
-                                                != &chainspec.protocol_config.version
+                                            if awaiting_reply_from_peers
+                                                .lock()
+                                                .await
+                                                .contains(peer_addr)
                                             {
-                                                error!("ProtocolVersion in handshake did not match our protocol version");
-                                                continue;
+                                                info!("Received handshake from the contacted peer");
+
+                                                if Comms::is_valid_handshake_parameters(
+                                                    network_name,
+                                                    protocol_version,
+                                                    chainspec_hash,
+                                                    &chainspec,
+                                                ) {
+                                                    info!("Handshake complete! Successfully connected to peer {peer_addr:?}");
+
+                                                    // Remove the peer since we are through with the handshake.
+                                                    awaiting_reply_from_peers
+                                                        .lock()
+                                                        .await
+                                                        .retain(|addr| addr != peer_addr);
+
+                                                    fully_connected_peers
+                                                        .lock()
+                                                        .await
+                                                        .push(*peer_addr);
+                                                    continue;
+                                                } else {
+                                                    error!("Error connecting to peer: Bad Handshake parameters");
+                                                    continue;
+                                                }
                                             }
 
-                                            // Check if the peer has Chainspec config. This should be true because we have
-                                            // a protocol version at this point.
-                                            let peer_chainspec_hash = if let Some(hash) =
-                                                chainspec_hash
-                                            {
-                                                hash
-                                            } else {
-                                                error!("Chainspec hash missing from handshake.");
-                                                continue;
-                                            };
-
-                                            // Check if the peer has the same Chainspec config hash
-                                            if peer_chainspec_hash != &chainspec.hash() {
-                                                error!("Chainspec hash in handshake did not match our chainspec.");
+                                            if !Comms::is_valid_handshake_parameters(
+                                                network_name,
+                                                protocol_version,
+                                                chainspec_hash,
+                                                &chainspec,
+                                            ) {
+                                                error!("Error connecting to peer: Bad Handshake parameters");
                                                 continue;
                                             }
 
                                             // Notify the event loop
-                                            let _ = event_tx.send((*addr, msg.clone())).await;
+                                            let _ = event_tx.send((*peer_addr, msg.clone())).await;
 
                                             // Send back a handshake message on the same stream
                                             let hs: Message<P> = Message::Handshake {
@@ -338,6 +372,10 @@ impl Comms {
                                                             "Error sending handshake to CASPER!: {e:?}"
                                                         );
                                                     }
+                                                    fully_connected_peers
+                                                        .lock()
+                                                        .await
+                                                        .push(*peer_addr);
                                                 }
                                                 Err(e) => {
                                                     error!("Error serializing handshake for Casper!: {e:?}");
@@ -347,7 +385,6 @@ impl Comms {
                                         }
                                         _ => {
                                             info!("Ignoring post-handshake traffic from Casper");
-                                            println!("Ignoring post-handshake traffic from Casper");
                                         }
                                     }
                                 } else {
@@ -361,7 +398,8 @@ impl Comms {
                                         .deserialize(&bytes_read)
                                     {
                                         Ok(message) => {
-                                            let _ = event_tx.send((*addr, message.clone())).await;
+                                            let _ =
+                                                event_tx.send((*peer_addr, message.clone())).await;
                                             message
                                         }
                                         Err(e) => {
@@ -380,6 +418,90 @@ impl Comms {
                 }
             }
         })
+    }
+
+    pub async fn send_ping_to<P: Payload>(&self, addr: SocketAddr) -> Result<(), CommsError> {
+        let ping: Message<P> = Message::Ping {
+            nonce: Nonce::new(rand::thread_rng().next_u64()),
+        };
+
+        let mut encoder = BincodeFormat::default();
+
+        let serialized_ping_message = Pin::new(&mut encoder)
+            .serialize(&Arc::new(ping))
+            .map_err(|e| CommsError::CouldNotEncodeOurHandshake(e.to_string()))?;
+
+        trace!("Trying to send a Handshake to {addr:?}");
+
+        self.send_message_to(addr, serialized_ping_message).await?;
+
+        info!("Sent a ping to {addr:?}");
+
+        Ok(())
+    }
+
+    pub async fn send_handshake_to<P: Payload>(&self, addr: SocketAddr) -> Result<(), CommsError> {
+        let hs: Message<P> = Message::Handshake {
+            network_name: self.chainspec.network_config.name.clone(),
+            public_addr: self.our_address(),
+            protocol_version: self.chainspec.protocol_version(),
+            consensus_certificate: None,
+            is_syncing: false,
+            chainspec_hash: Some(self.chainspec.hash()),
+        };
+
+        let mut encoder = MessagePackFormat;
+
+        let serialized_handshake_message = Pin::new(&mut encoder)
+            .serialize(&Arc::new(hs))
+            .map_err(|e| CommsError::CouldNotEncodeOurHandshake(e.to_string()))?;
+
+        trace!("Trying to send a Handshake to {addr:?}");
+
+        self.send_message_to(addr, serialized_handshake_message)
+            .await?;
+
+        info!("Sent a handshake to {addr:?}");
+
+        self.awaiting_hs_reply_from.lock().await.push(addr);
+
+        Ok(())
+    }
+
+    fn is_valid_handshake_parameters(
+        network_name: &String,
+        protocol_version: &ProtocolVersion,
+        chainspec_hash: &Option<Digest>,
+        our_chainspec: &Chainspec,
+    ) -> bool {
+        // Check if the handshake is from the correct network
+        if network_name != &our_chainspec.network_config.name {
+            error!("Network name in handshake did not match our network");
+            return false;
+        }
+
+        // Check if the peer is the correct protocol version
+        if protocol_version != &our_chainspec.protocol_config.version {
+            error!("ProtocolVersion in handshake did not match our protocol version");
+            return false;
+        }
+
+        // Check if the peer has Chainspec config. This should be true because we have
+        // a protocol version at this point.
+        let peer_chainspec_hash = if let Some(hash) = chainspec_hash {
+            hash
+        } else {
+            error!("Chainspec hash missing from handshake.");
+            return false;
+        };
+
+        // Check if the peer has the same Chainspec config hash
+        if peer_chainspec_hash != &our_chainspec.hash() {
+            error!("Chainspec hash in handshake did not match our chainspec.");
+            return false;
+        }
+
+        true
     }
 
     pub async fn send_message_to(
