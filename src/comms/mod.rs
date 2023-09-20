@@ -126,8 +126,8 @@ impl Comms {
             .ssl()
             .peer_certificate()
             .ok_or(TLSError::NoPeerCertificate)?;
-        //
-        // // We'll validate them just as Casper does to maintain integrity
+
+        // We'll validate them just as Casper does to maintain integrity
         let _validated_peer_cert = validate_self_signed_cert(peer_cert)?;
 
         info!("Validated Peer Cert");
@@ -145,6 +145,7 @@ impl Comms {
             .insert(*peer_addr, framed_transport);
         Ok(())
     }
+
     /// Creates a TLS acceptor for a client.
     ///
     /// A connector compatible with the acceptor created using `create_tls_acceptor`. Server

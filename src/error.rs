@@ -1,15 +1,17 @@
 use crate::casper_types::chainspec::Error as ChainspecError;
 use crate::CommsError;
 use bincode::ErrorKind;
+use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum Error {
-    Generic(String),
+    #[error("Error from the Communications module {0:?}")]
     Comms(CommsError),
+    #[error("Serialization error from Bincode {0:?}")]
     Bincode(ErrorKind),
-    HandShake(String),
+    #[error("Chainspec Error {0:?}")]
     Chainspec(ChainspecError),
 }
 
